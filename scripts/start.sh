@@ -14,45 +14,61 @@ fi
 mkdir -p logs
 command -v flock >/dev/null || { echo 'Install util-linux (flock)' >&2; exit 1; }
 
-stop_existing_service() {
-  local -a candidates=()
-  local p holders
+collect_service_pids() {
+  local -a found=()
+  local p holders cwd
   if [[ -f .service.pid ]]; then
     p=$(tr -d '[:space:]' < .service.pid || true)
     if [[ "$p" =~ ^[0-9]+$ ]]; then
-      candidates+=("$p")
+      found+=("$p")
     fi
   fi
   if command -v fuser >/dev/null 2>&1 && [[ -f .service.lock ]]; then
     holders=$(fuser .service.lock 2>/dev/null || true)
     for p in $holders; do
       if [[ "$p" =~ ^[0-9]+$ ]]; then
-        candidates+=("$p")
+        found+=("$p")
       fi
     done
   fi
-  if [[ ${#candidates[@]} -eq 0 ]]; then
-    rm -f .service.pid
-    return 0
+  # Bash $$ in a subshell is the parent PID; older starts wrote the wrong pid.
+  # Also find node processes whose cwd is this project.
+  if command -v pgrep >/dev/null 2>&1; then
+    while read -r p; do
+      [[ "$p" =~ ^[0-9]+$ ]] || continue
+      cwd=$(readlink "/proc/$p/cwd" 2>/dev/null || true)
+      if [[ "$cwd" == "$PWD" ]]; then
+        found+=("$p")
+      fi
+    done < <(pgrep -f 'node dist/main.js' || true)
   fi
-  # Deduplicate.
   local -A seen=()
   local -a unique=()
-  for p in "${candidates[@]}"; do
+  for p in "${found[@]}"; do
     if [[ -z ${seen[$p]+x} ]]; then
       seen[$p]=1
       unique+=("$p")
     fi
   done
+  printf '%s\n' "${unique[@]}"
+}
+
+stop_existing_service() {
+  local -a unique=()
+  local p i any
+  mapfile -t unique < <(collect_service_pids)
+  if [[ ${#unique[@]} -eq 0 || -z "${unique[0]:-}" ]]; then
+    rm -f .service.pid
+    return 0
+  fi
   for p in "${unique[@]}"; do
     if kill -0 "$p" 2>/dev/null; then
       echo "Stopping previous service (pid $p)…"
       kill "$p" 2>/dev/null || true
     fi
   done
-  local i
   for i in $(seq 1 30); do
-    local any=0
+    any=0
     for p in "${unique[@]}"; do
       if kill -0 "$p" 2>/dev/null; then
         any=1
@@ -70,14 +86,21 @@ stop_existing_service() {
   done
   sleep 0.3
   rm -f .service.pid
+  # Confirm the lock is free before we start.
+  if ! flock -n 9 true 9>.service.lock; then
+    echo 'Service lock is still held after stop; see fuser .service.lock' >&2
+    fuser -v .service.lock 2>&1 || true
+    return 1
+  fi
 }
 
 stop_existing_service
 
 # Hold the lock inside the daemon so it lasts until Node exits.
+# Use BASHPID: $$ inside (... ) is still the parent shell PID.
 (
   flock -n 9 || exit 75
-  printf '%s\n' $$ > .service.pid
+  printf '%s\n' "$BASHPID" > .service.pid
   if command -v stdbuf >/dev/null; then
     exec stdbuf -oL -eL node dist/main.js
   fi
