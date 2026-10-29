@@ -7,7 +7,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "start": "bash scripts/start.sh",
-    "dev": "tsx src/main.ts",
+    "dev": "bash scripts/dev.sh",
     "test": "node --import tsx --test --test-concurrency=1 test/*.test.ts",
     "check": "tsc --noEmit && python3 -m unittest discover -s python -p 'test_*.py' -v",
     "smoke": "node examples/smoke.mjs"
