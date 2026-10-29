@@ -13,7 +13,9 @@ fi
 
 # nvm.sh reads unset variables and may exit non-zero when .nvmrc is not installed yet.
 # Relax nounset/errexit only while it loads; install happens below.
+# npm_config_prefix (often left by a system Node under /usr/local) blocks nvm use/install.
 set +eu
+unset npm_config_prefix NPM_CONFIG_PREFIX
 if ! declare -F nvm >/dev/null 2>&1; then
   NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
   if [[ -s "$NVM_DIR/nvm.sh" ]]; then
