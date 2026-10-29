@@ -41,7 +41,7 @@ npm run build
 npm run start
 ```
 
-`npm run start` 会按 `.nvmrc` 切换 Node，用 PM2 拉起 `gpu-image-service`。HTTP 起来且至少一个 Worker 就绪后才算启动成功；进程由 PM2 守护，掉线会自动拉起。再次 `npm run start` 会先删掉旧实例再启动。
+`npm run start` 会按 `.nvmrc` 切换 Node，用 PM2 拉起 `gpu-image-service`：HTTP 一监听就交给 PM2 守护，前台继续刷日志直到 `/health/ready` 成功（Worker 已就绪）才回到提示符。进程掉线会自动拉起。再次 `npm run start` 会先删掉旧实例再启动。
 
 ```bash
 npm run logs    # 看 PM2 日志

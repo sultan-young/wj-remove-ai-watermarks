@@ -21,7 +21,6 @@ PM2=(./node_modules/.bin/pm2)
 export GPU_IMAGE_NODE
 GPU_IMAGE_NODE="$(command -v node)"
 APP_NAME=gpu-image-service
-# ecosystem.config.cjs reads this for wait_ready listen_timeout.
 timeout_s=$(grep -E '^WORKER_START_TIMEOUT_SECONDS=' .env 2>/dev/null | tail -n1 | cut -d= -f2- | tr -d '[:space:]' || true)
 export WORKER_START_TIMEOUT_SECONDS="${timeout_s:-600}"
 
@@ -53,9 +52,53 @@ if command -v pgrep >/dev/null 2>&1; then
 fi
 rm -f .service.lock
 
-echo "Starting $APP_NAME with PM2 (wait_ready, timeout ${WORKER_START_TIMEOUT_SECONDS}s)…"
+echo "Starting $APP_NAME with PM2…"
 if ! "${PM2[@]}" start ecosystem.config.cjs --update-env; then
   echo 'PM2 failed to start the app; see: npm run logs' >&2
+  exit 1
+fi
+
+echo "HTTP process started. Streaming logs until /health/ready (timeout ${WORKER_START_TIMEOUT_SECONDS}s)…"
+"${PM2[@]}" logs "$APP_NAME" --raw --lines 0 &
+logs_pid=$!
+cleanup_logs() { kill "$logs_pid" 2>/dev/null || true; wait "$logs_pid" 2>/dev/null || true; }
+trap cleanup_logs EXIT
+
+set +e
+node --input-type=module <<'JS'
+import 'dotenv/config';
+
+const port = process.env.PORT || '8000';
+const key = process.env.API_KEY;
+const timeoutMs = Math.max(1, Number(process.env.WORKER_START_TIMEOUT_SECONDS || 600)) * 1000;
+const deadline = Date.now() + timeoutMs;
+if (!key) {
+  console.error('API_KEY missing from .env');
+  process.exit(1);
+}
+
+while (Date.now() < deadline) {
+  try {
+    const response = await fetch(`http://127.0.0.1:${port}/health/ready`, {
+      headers: { Authorization: `Bearer ${key}` },
+    });
+    if (response.ok) process.exit(0);
+  } catch {
+    // not listening / not ready yet
+  }
+  await new Promise(resolve => setTimeout(resolve, 1000));
+}
+process.exit(3);
+JS
+wait_code=$?
+set -e
+cleanup_logs
+trap - EXIT
+
+if [[ "$wait_code" -ne 0 ]]; then
+  echo "Workers did not become ready in time; see: npm run logs" >&2
+  "${PM2[@]}" logs "$APP_NAME" --lines 80 --nostream || true
+  "${PM2[@]}" delete "$APP_NAME" >/dev/null 2>&1 || true
   exit 1
 fi
 
@@ -70,8 +113,7 @@ if (!app || app.pm2_env?.status !== "online") {
   process.exit(1);
 }
 '; then
-  echo 'Startup did not reach online; see: npm run logs' >&2
-  "${PM2[@]}" logs "$APP_NAME" --lines 50 --nostream || true
+  echo 'Startup did not keep the app online; see: npm run logs' >&2
   exit 1
 fi
 

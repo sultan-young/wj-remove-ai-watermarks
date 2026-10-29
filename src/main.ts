@@ -12,16 +12,18 @@ for (const signal of ['SIGINT', 'SIGTERM'] as const) process.on(signal, async ()
 });
 await app.listen({ host: config.host, port: config.port });
 app.log.info({ concurrency: config.concurrency, devices: config.devices, mode: config.workerMode }, 'GPU image service started');
+// Unblock PM2 wait_ready as soon as HTTP is listening. Worker readiness is checked by start.sh.
+if (typeof process.send === 'function') process.send('ready');
 
 const deadline = Date.now() + config.startupTimeoutMs;
 while (Date.now() < deadline) {
-  if (manager.slots.some(slot => slot.client.ready)) break;
+  if (manager.slots.some(slot => slot.client.ready)) {
+    app.log.info({ workers: manager.slots.filter(slot => slot.client.ready).length }, 'Workers ready');
+    break;
+  }
   await new Promise(resolve => setTimeout(resolve, 1000));
 }
 if (!manager.slots.some(slot => slot.client.ready)) {
   app.log.error({ timeout_ms: config.startupTimeoutMs }, 'No worker became ready before startup timeout');
   process.exit(1);
 }
-app.log.info({ workers: manager.slots.filter(slot => slot.client.ready).length }, 'Workers ready');
-// Tell PM2 wait_ready that the process can accept traffic.
-if (typeof process.send === 'function') process.send('ready');
