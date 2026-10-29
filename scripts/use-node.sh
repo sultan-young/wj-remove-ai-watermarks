@@ -11,8 +11,9 @@ if [[ ! "$_node_expected" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   return 1
 fi
 
-# nvm.sh reads unset variables. Relax nounset only while it loads.
-set +u
+# nvm.sh reads unset variables and may exit non-zero when .nvmrc is not installed yet.
+# Relax nounset/errexit only while it loads; install happens below.
+set +eu
 if ! declare -F nvm >/dev/null 2>&1; then
   NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
   if [[ -s "$NVM_DIR/nvm.sh" ]]; then
@@ -20,15 +21,17 @@ if ! declare -F nvm >/dev/null 2>&1; then
     . "$NVM_DIR/nvm.sh"
   fi
 fi
+set -e
 if ! declare -F nvm >/dev/null 2>&1; then
   set -u
   echo 'nvm is installed in this environment but was not found. Set NVM_DIR to the directory that contains nvm.sh.' >&2
   return 1
 fi
 
-if ! nvm use "$_node_expected"; then
+if ! nvm use "$_node_expected" >/dev/null 2>&1; then
   echo "Installing Node $_node_expected from .nvmrc" >&2
   nvm install "$_node_expected"
+  nvm use "$_node_expected"
 fi
 set -u
 hash -r
