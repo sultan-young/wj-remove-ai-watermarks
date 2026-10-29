@@ -30,7 +30,7 @@ HTTP/集成测试实际启动 Python mock Worker、本地 HTTP 源站，JS 客�
 - TTL 到期、记录删除、服务重启后旧任务 ID 404。
 - 不就绪时返回 503，排队等待超过时限明确失败。
 
-Python adapter 测试通过模型模块替身验证：引擎只初始化一次、参数映射、vendor 自动读取及显式覆盖、force=false 无信号分支、版本不匹配拒绝启动。上游静态检查读取真实 0.47.1 wheel，不导入 Torch。
+Python adapter 测试通过模型模块替身验证：引擎只初始化一次、参数原样传入、vendor 自动读取及显式覆盖、force=false 无信号分支、文字清单不被改写、版本不匹配拒绝启动。上游静态检查读取真实 0.47.1 wheel，不导入 Torch。
 
 ## 未执行，必须在目标 GPU 验证
 

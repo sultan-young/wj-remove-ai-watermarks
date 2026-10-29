@@ -113,7 +113,8 @@ export class Manager {
       if (!slot.client.ready) {
         if (Date.now() < slot.retryAt) continue;
         slot.recovering = true;
-        const defaults = { pipeline: this.config.defaultPipeline, controlnet_scale: 1, cpu_offload: false };
+        const pipeline = this.config.enabled.includes('qwen-zimage') ? 'qwen-zimage' : this.config.enabled[0]!;
+        const defaults = { pipeline, controlnet_conditioning_scale: 1, cpu_offload: false };
         void slot.client.start(defaults).catch(e => { this.log(`worker initialization: ${e.message}`); slot.retryAt = Date.now() + this.config.restartDelayMs; })
           .finally(() => { slot.recovering = false; this.pump(); });
         continue;

@@ -38,11 +38,11 @@ Linux Worker 设置父进程退出信号，减少 Node 异常退出后的孤立�
 
 Zod 定义参数及默认值，并导出 JSON Schema 供无界生成表单。Python adapter 将字段显式映射到原项目调用；不向底层直接透传任意 JSON kwargs。TS 持有公开协议，Python 只处理经过服务验证的任务。
 
-API 使用 snake_case 对齐原项目。服务限制范围可比底层更窄，capabilities 明确标记为服务资源限制。hf_token 仅来自部署环境。
+处理参数使用上游的名字和默认值。服务不收紧取值、不把省略的 pipeline 改成另一套，也不改写 text_manifest。队列、字节和像素上限是这台机器的资源限制，不是去水印参数。hf_token 仅来自部署环境。
 
-force 默认 true；调用者已明确提交处理请求。vendor auto 从原文件识别，显式 vendor 覆盖。requested 与 effective 分别保存，默认强度不会被 TS 猜测或替换。
+vendor 为 auto 时，传给引擎的 cohort 与上游 invisible 命令一样，从原文件解析。显式 vendor 覆盖并跳过无信号检查。requested 保存调用方提交的值；effective 里的 strength 是上游解析后的执行值，提交的 null 不会先被改掉。
 
-上游内部 pipeline=auto 由原项目路由；它可能触发不同模型的加载，不承诺 consumer GPU 上混用多种模型具有固定耗时或相同显存占用。当前部署只启用已经跑通的 sdxl-zimage。
+上游内部 pipeline=auto 由原项目路由；它可能触发不同模型的加载，不承诺 consumer GPU 上混用多种模型具有固定耗时或相同显存占用。ENABLED_PIPELINES 只决定这台机器能不能加载某个上游 profile。
 
 ## 文件及恢复
 

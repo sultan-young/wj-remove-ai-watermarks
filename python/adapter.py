@@ -1,12 +1,13 @@
 """Thin adapter for the exact remove-ai-watermarks 0.47.1 Python interface."""
-import hashlib
 import importlib.metadata
-import json
 import os
 import shutil
 import time
 from pathlib import Path
 from PIL import Image, ImageOps
+
+
+_UNRESOLVED = object()
 
 
 class AdapterError(Exception):
@@ -24,52 +25,6 @@ def inspect_image(path):
             raise AdapterError("INVALID_IMAGE", "Image pixel limit exceeded")
         image.load()
         return ImageOps.exif_transpose(image).size
-
-
-def source_pixel_sha256(image):
-    """与上游 text_restoration.source_pixel_sha256 相同：宽、高各 8 字节大端，再加 RGB 像素。"""
-    rgb = image.convert("RGB")
-    digest = hashlib.sha256()
-    digest.update(rgb.width.to_bytes(8, "big"))
-    digest.update(rgb.height.to_bytes(8, "big"))
-    digest.update(rgb.tobytes())
-    return digest.hexdigest()
-
-
-def bind_text_manifest(source, manifest_path):
-    """文字框按进入隐式重建的那张图重新绑定像素哈希。完整处理时这张图已经清过可见水印。"""
-    if not manifest_path:
-        return None
-    path = Path(manifest_path)
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(payload, dict):
-        raise AdapterError("INVALID_MANIFEST", "Text manifest must be an object")
-    raw_lines = payload.get("lines")
-    if not isinstance(raw_lines, list) or not raw_lines:
-        raise AdapterError("INVALID_MANIFEST", "Text manifest lines must be a non-empty list")
-    with Image.open(source) as image:
-        rgb = ImageOps.exif_transpose(image).convert("RGB")
-        width, height = rgb.size
-        lines = []
-        for index, item in enumerate(raw_lines):
-            box = item.get("box") if isinstance(item, dict) else None
-            if not isinstance(box, list) or len(box) != 4 or any(isinstance(value, bool) or not isinstance(value, int) for value in box):
-                raise AdapterError("INVALID_MANIFEST", f"Text manifest line {index} box must contain four integers")
-            x1, y1, x2, y2 = box
-            if not (0 <= x1 < x2 <= width and 0 <= y1 < y2 <= height):
-                raise AdapterError("INVALID_MANIFEST", f"Text manifest line {index} box is outside the source")
-            lines.append({"box": [x1, y1, x2, y2]})
-        lines.sort(key=lambda line: (line["box"][1], line["box"][0]))
-        payload = {
-            "schema_version": 2,
-            "verified": True,
-            "width": width,
-            "height": height,
-            "source_pixel_sha256": source_pixel_sha256(rgb),
-            "lines": lines,
-        }
-    path.write_text(json.dumps(payload), encoding="utf-8")
-    return path
 
 
 def stage_from_message(message):
@@ -90,11 +45,17 @@ def stage_from_message(message):
 def probe_optional_capabilities():
     """可见水印和神经填充是可选安装。探测失败时只保留不会因为缺包而报错的选项。"""
     visible = False
+    marks = ["auto"]
     try:
         import remove_ai_watermarks as raiw
         visible = callable(getattr(raiw, "remove_visible_detailed", None))
     except Exception:
-        return False, ["auto"]
+        return False, ["auto"], ["auto"]
+    try:
+        from remove_ai_watermarks import watermark_registry
+        marks = ["auto", *watermark_registry.mark_keys()]
+    except Exception:
+        pass
     backends = ["auto"]
     try:
         import importlib.util
@@ -105,7 +66,7 @@ def probe_optional_capabilities():
                 backends.append(backend)
     except Exception:
         pass
-    return visible, backends
+    return visible, backends, marks
 
 
 class RealAdapter:
@@ -116,11 +77,11 @@ class RealAdapter:
         self.progress = progress
         self.config = config
         self.engine = None
-        visible, backends = probe_optional_capabilities()
+        visible, backends, marks = probe_optional_capabilities()
         self.info = {
             "mode": "real", "library_version": version,
             "engine": None, "preload": None,
-            "visible_available": visible, "visible_backends": backends,
+            "visible_available": visible, "visible_backends": backends, "visible_marks": marks,
         }
 
     def _ensure_engine(self):
@@ -132,7 +93,7 @@ class RealAdapter:
         from remove_ai_watermarks.invisible_engine import InvisibleEngine
         self.engine = InvisibleEngine(
             pipeline=self.config["pipeline"],
-            controlnet_conditioning_scale=self.config["controlnet_scale"],
+            controlnet_conditioning_scale=self.config["controlnet_conditioning_scale"],
             cpu_offload=self.config["cpu_offload"],
             progress_callback=self._progress,
         )
@@ -158,7 +119,7 @@ class RealAdapter:
         if mode == "metadata":
             return self._metadata(source, output)
         if mode == "visible":
-            report = self._visible(source, output, p)
+            report = self._visible(source, output, p, keep_original_when_absent=False)
             return {"mode": "visible", "verification": "not_performed", **report}
         if mode == "all":
             return self._all(source, output, p, job.get("manifest"))
@@ -166,23 +127,76 @@ class RealAdapter:
             raise AdapterError("INVALID_MODE", "Unsupported processing mode")
         return self._invisible(source, output, p, job.get("manifest"))
 
-    def _visible(self, source, output, processing):
+    def _visible(self, source, output, processing, *, keep_original_when_absent):
+        """keep_original_when_absent 只给 all 的中间图。单独的 visible 与上游一样：没去掉标记就不写结果。"""
         import remove_ai_watermarks as raiw
-        if not hasattr(raiw, "remove_visible_detailed"):
-            raise AdapterError("UPSTREAM_UNAVAILABLE", "Visible removal is not available in this install")
-        sensitivity = str(processing.get("visible_mark") or "auto").strip().lower()
+        sensitivity = str(processing.get("sensitivity") or "auto").strip().lower()
         if sensitivity not in ("auto", "strict"):
-            raise AdapterError("INVALID_OPTIONS", "visible_mark must be auto or strict")
-        kwargs = {"strip_metadata": True, "write_noop": True, "sensitivity": sensitivity}
-        backend = processing.get("visible_backend") or "auto"
-        if backend != "auto":
-            kwargs["backend"] = backend
+            raise AdapterError("INVALID_OPTIONS", "sensitivity must be auto or strict")
+        mark = str(processing.get("mark") or "auto").strip().lower()
+        detect = bool(processing.get("detect", True))
+        if processing.get("mode") == "all" and (mark != "auto" or not detect):
+            raise AdapterError("INVALID_OPTIONS", "all mode only runs the upstream auto visible pass")
+        backend = processing.get("backend") or "auto"
         self.progress("visible")
         try:
-            report = raiw.remove_visible_detailed(str(source), str(output), **kwargs)
+            if mark == "auto" and detect:
+                if not hasattr(raiw, "remove_visible_detailed"):
+                    raise AdapterError("UPSTREAM_UNAVAILABLE", "Visible removal is not available in this install")
+                return self._visible_auto(raiw, source, output, sensitivity, backend, keep_original_when_absent)
+            # 上游 --no-detect 且 --mark auto 时，显式路径回落到 gemini。
+            return self._visible_explicit(source, output, sensitivity, "gemini" if mark == "auto" else mark, detect, backend)
         except ImportError as error:
             raise AdapterError("UPSTREAM_UNAVAILABLE", "Visible removal dependencies are not installed") from error
+
+    def _visible_auto(self, raiw, source, output, sensitivity, backend, keep_original_when_absent):
+        kwargs = {"strip_metadata": True, "write_noop": keep_original_when_absent, "sensitivity": sensitivity}
+        if backend != "auto":
+            kwargs["backend"] = backend
+        report = raiw.remove_visible_detailed(str(source), str(output), **kwargs)
+        marks = self._visible_labels(report)
+        if not marks and not keep_original_when_absent:
+            output.unlink(missing_ok=True)
+            raise AdapterError("NO_VISIBLE_MARK", "No known visible mark detected")
+        if not output.exists() and keep_original_when_absent:
+            shutil.copyfile(source, output)
         self._force_png(source, output)
+        return {
+            "visible_status": str(getattr(report, "status", "") or ""),
+            "visible_marks": marks,
+        }
+
+    def _visible_explicit(self, source, output, sensitivity, mark, detect, backend):
+        """与上游 visible --mark 相同：先检测命名标记；detect=false 时按该标记的固定足迹强制填充。"""
+        import remove_ai_watermarks as raiw
+        watermark_registry = raiw.watermark_registry
+        if mark not in set(watermark_registry.mark_keys()):
+            raise AdapterError("INVALID_OPTIONS", "Unknown visible mark")
+        image_io = raiw.image_io
+        visible_provenance = raiw.api.visible_provenance
+        image, alpha = image_io.read_bgr_and_alpha(str(source))
+        if image is None:
+            raise AdapterError("INVALID_IMAGE", "Failed to read image")
+        chosen = watermark_registry.get_mark(mark)
+        provenance = visible_provenance(source)
+        trust = watermark_registry.resolve_trust(
+            chosen.key, sensitivity=sensitivity, provenance=provenance, strict_keys=set(),
+        )
+        relax = trust != "strict"
+        detection = chosen.detect(image, provenance=relax)
+        if detect and not detection.detected:
+            output.unlink(missing_ok=True)
+            raise AdapterError("NO_VISIBLE_MARK", f"{chosen.label} not detected")
+        result, _region = chosen.remove(
+            image, backend=backend, provenance=relax, force=not detect, detection=detection,
+        )
+        if not image_io.write_bgr_with_alpha(str(output), result, alpha, display_tags_from=source):
+            raise AdapterError("OUTPUT_WRITE_FAILED", "Failed to write visible removal output")
+        self._strip_written_metadata(output)
+        self._force_png(source, output)
+        return {"visible_status": None, "visible_marks": [str(chosen.label)]}
+
+    def _visible_labels(self, report):
         marks = []
         for label in getattr(report, "labels", None) or []:
             if label:
@@ -191,10 +205,7 @@ class RealAdapter:
             label = item if isinstance(item, str) else getattr(item, "label", None)
             if label and str(label) not in marks:
                 marks.append(str(label))
-        return {
-            "visible_status": str(getattr(report, "status", "") or ""),
-            "visible_marks": marks,
-        }
+        return marks
 
     def _metadata(self, source, output):
         try:
@@ -215,35 +226,33 @@ class RealAdapter:
         self._force_png(source, output)
         return {"mode": "metadata", "metadata": metadata, "verification": "not_performed"}
 
-    def _processing_for_diffusion(self, source, processing):
-        """完整处理会先抹掉可见水印和元数据。来源和有无信号必须在原图上判断。"""
-        prepared = dict(processing)
-        if prepared.get("vendor") != "auto":
-            return prepared
-        from remove_ai_watermarks._internal.watermark_profiles import vendor_for_strength
-        if not prepared.get("force"):
+    def _vendor_for_engine(self, source, processing):
+        """与上游 invisible 命令相同：auto 先变成 None；显式 vendor 或 force 才跳过无信号检查。传给引擎的是解析后的 cohort。"""
+        requested = processing.get("vendor") or "auto"
+        resolved = None if requested == "auto" else requested
+        if not processing.get("force") and resolved is None:
             from remove_ai_watermarks.identify import has_invisible_target
             if not has_invisible_target(source):
                 raise AdapterError("NO_SIGNAL", "No supported local signal; explicit vendor or force is required")
-        prepared["vendor"] = vendor_for_strength(source)
-        prepared["force"] = True
-        return prepared
+        from remove_ai_watermarks._internal.watermark_profiles import vendor_for_strength
+        detected = vendor_for_strength(source) if resolved is None else None
+        return resolved or detected
 
     def _all(self, source, output, processing, manifest):
         """可见水印不依赖隐形信号。没有本地信号时仍返回可见处理结果，并标明隐形重建未执行。"""
         visible_path = output.with_name(output.name + ".visible.png")
         try:
-            visible = self._visible(source, visible_path, processing)
+            visible = self._visible(source, visible_path, processing, keep_original_when_absent=True)
             try:
                 # 来源和有无信号按原图判断，不用已经清过可见水印的中间图。
-                prepared = self._processing_for_diffusion(source, processing)
+                vendor = self._vendor_for_engine(source, processing)
             except AdapterError as error:
                 if error.code != "NO_SIGNAL":
                     raise
                 shutil.copyfile(visible_path, output)
                 self._strip_written_metadata(output)
-                return {**visible, "mode": "all", "invisible": "not_run", "reason": "NO_SIGNAL", "verification": "not_performed"}
-            invisible = self._invisible(visible_path, output, prepared, manifest)
+                return {**visible, "mode": "all", "invisible": "no-signal", "reason": "NO_SIGNAL", "verification": "not_performed"}
+            invisible = self._invisible(visible_path, output, processing, manifest, vendor)
         finally:
             visible_path.unlink(missing_ok=True)
         self._strip_written_metadata(output)
@@ -275,20 +284,12 @@ class RealAdapter:
             current.save(temporary, format="PNG")
         temporary.replace(output)
 
-    def _invisible(self, source, output, p, manifest_path):
-        from remove_ai_watermarks._internal.watermark_profiles import (
-            vendor_for_strength, resolve_strength, resolve_effective_profile,
-        )
-        manifest = bind_text_manifest(source, manifest_path)
+    def _invisible(self, source, output, p, manifest_path, vendor=_UNRESOLVED):
+        from remove_ai_watermarks._internal.watermark_profiles import resolve_strength, resolve_effective_profile
+        if vendor is _UNRESOLVED:
+            vendor = self._vendor_for_engine(source, p)
+        manifest = Path(manifest_path) if manifest_path else None
         width, height = inspect_image(source)
-        explicit = p["vendor"] != "auto"
-        vendor = p["vendor"] if explicit else vendor_for_strength(source)
-        if not p["force"] and not explicit:
-            from remove_ai_watermarks.identify import has_invisible_target
-            if not has_invisible_target(source):
-                raise AdapterError("NO_SIGNAL", "No supported local signal; explicit vendor or force is required")
-        if manifest and os.environ.get("ENABLE_TEXT_RESTORATION") != "true":
-            raise AdapterError("TEXT_RESTORATION_DISABLED", "Text restoration disabled")
         profile = resolve_effective_profile(p["pipeline"], vendor)
         strength = resolve_strength(p["strength"], vendor, p["pipeline"], size=(width, height))
         self.progress("processing")
@@ -296,7 +297,7 @@ class RealAdapter:
             image_path=source, output_path=output,
             strength=p["strength"], seed=p["seed"], vendor=vendor,
             max_resolution=p["max_resolution"], humanize=p["humanize"], unsharp=p["unsharp"],
-            adaptive_polish={"default": None, "on": True, "off": False}[p["adaptive_polish"]],
+            adaptive_polish=p.get("adaptive_polish"),
             tile=p["tile"], tile_size=p["tile_size"], tile_overlap=p["tile_overlap"],
             text_manifest=manifest, fidelity_anchor=p["fidelity_anchor"],
         )
@@ -319,6 +320,7 @@ class MockAdapter:
         self.info = {
             "mode": "mock", "gpu": None, "engine": config, "warning": "MOCK: no watermark processing",
             "visible_available": True, "visible_backends": ["auto", "cv2", "migan", "lama"],
+            "visible_marks": ["auto"],
         }
 
     def process(self, job):

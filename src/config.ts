@@ -9,17 +9,17 @@ const flag = (value: string | undefined, fallback: boolean) => {
   if (!['true', 'false', '1', '0'].includes(value)) throw new Error(`Invalid boolean: ${value}`);
   return value === 'true' || value === '1';
 };
-export const profiles = ['sdxl-zimage', 'qwen-zimage', 'chroma-zimage', 'auto'] as const;
+export const profiles = ['qwen-zimage', 'sdxl-zimage', 'chroma-zimage', 'auto'] as const;
+/** Omitted `pipeline` uses the upstream default. It is never replaced by another profile. */
+export const upstreamPipeline = 'qwen-zimage' as const;
 export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
   const key = z.string().min(24).parse(env.API_KEY);
   if (key.startsWith('replace-this-')) throw new Error('Replace the example API_KEY before starting');
-  const enabled = (env.ENABLED_PIPELINES ?? 'sdxl-zimage').split(',').map(x => z.enum(profiles).parse(x.trim()));
-  const defaultPipeline = z.enum(profiles).parse(env.DEFAULT_PIPELINE ?? 'sdxl-zimage');
-  if (!enabled.includes(defaultPipeline)) throw new Error('DEFAULT_PIPELINE must be enabled');
+  const enabled = (env.ENABLED_PIPELINES ?? profiles.join(',')).split(',').map(x => z.enum(profiles).parse(x.trim()));
   const devices = (env.GPU_DEVICES ?? '0').split(',').map(x => x.trim());
   if (devices.some(x => !/^(\d+|GPU-[\w-]+|MIG-[\w/-]+)$/.test(x))) throw new Error('Invalid GPU_DEVICES');
   return {
-    key, enabled, defaultPipeline, devices,
+    key, enabled, devices,
     host: env.HOST ?? '0.0.0.0', port: integer(env.PORT, 8000, 1, 65535),
     concurrency: integer(env.WORKER_CONCURRENCY, 1, 1, 16),
     maxQueue: integer(env.MAX_QUEUE_SIZE, 32, 1, 10000),
@@ -41,7 +41,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     workerMode: z.enum(['real', 'mock']).parse(env.WORKER_MODE ?? 'real'),
     hfHome: path.resolve(env.HF_HOME ?? './model-cache'),
     modelOffline: flag(env.MODEL_OFFLINE, true),
-    textRestoration: flag(env.ENABLE_TEXT_RESTORATION, false),
     logLevel: z.enum(['silent', 'fatal', 'error', 'warn', 'info', 'debug', 'trace']).parse(env.LOG_LEVEL ?? 'info'),
     workerEnv: {} as NodeJS.ProcessEnv,
   };

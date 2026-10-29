@@ -6,7 +6,7 @@ import { createReadStream } from 'node:fs';
 import { readFile, writeFile, rm, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { Manager, createRunDir, type Job } from './manager.js';
-import { type Config } from './config.js';
+import { upstreamPipeline, type Config } from './config.js';
 import { requestOptionsSchema, parseOptions } from './options.js';
 import { ServiceError } from './errors.js';
 import { saveLimited, validateImage } from './images.js';
@@ -42,16 +42,17 @@ export async function buildApp(config: Config) {
     const probed = manager.slots.map(slot => slot.client.info).find(info => typeof info.visible_available === 'boolean');
     const visibleAvailable = Boolean(probed && probed.visible_available !== false);
     const visibleBackends = Array.isArray(probed?.visible_backends) ? probed.visible_backends : ['auto', 'cv2'];
+    const visibleMarks = Array.isArray(probed?.visible_marks) ? probed.visible_marks : ['auto'];
     return {
     service_version: '1.0.0', library_version: '0.47.1', protocol_version: 1, worker_mode: config.workerMode,
-    default_pipeline: config.defaultPipeline, enabled_pipelines: config.enabled,
+    default_pipeline: upstreamPipeline, enabled_pipelines: config.enabled,
     concurrency: config.concurrency, gpu_devices: config.devices,
     input: { methods: ['multipart', 'url'], formats: ['png', 'jpeg', 'webp'], max_bytes: config.maxBytes, max_pixels: config.maxPixels,
       url_allowed_ports: config.urlPorts, url_private_addresses_allowed: config.urlAllowPrivate },
     modes: visibleAvailable ? ['all', 'visible', 'invisible', 'metadata'] : ['invisible', 'metadata'],
     visible_backends: visibleBackends,
+    visible_marks: visibleMarks,
     output: { format: 'png', retains_input_dimensions: true, ttl_seconds: config.retentionMs / 1000 },
-    text_restoration_enabled: config.textRestoration,
     limits_are_service_limits: true,
     options_schema: z.toJSONSchema(requestOptionsSchema, { target: 'draft-7', io: 'input' }),
     workers: manager.status().workers,
@@ -101,13 +102,8 @@ export async function buildApp(config: Config) {
       let options;
       try { options = parseOptions(rawOptions, config); }
       catch (error) { throw new ServiceError(400, 'INVALID_OPTIONS', error instanceof Error ? error.message : 'Invalid options'); }
-      if (manifest !== undefined) {
-        if (!config.textRestoration) throw new ServiceError(400, 'TEXT_RESTORATION_DISABLED', 'Text restoration is disabled');
-        if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest)) throw new ServiceError(400, 'INVALID_MANIFEST', 'Manifest must be an object');
-        const p = options.processing;
-        if (p.tile || p.max_resolution !== 0 || p.humanize || p.unsharp || p.adaptive_polish === 'on')
-          throw new ServiceError(400, 'INVALID_TEXT_OPTIONS', 'Text restoration requires native geometry, no tiling, humanize, unsharp or enabled polish');
-      } else if (options.processing.fidelity_anchor) throw new ServiceError(400, 'MANIFEST_REQUIRED', 'fidelity_anchor requires text_manifest');
+      if (manifest !== undefined && (!manifest || typeof manifest !== 'object' || Array.isArray(manifest)))
+        throw new ServiceError(400, 'INVALID_MANIFEST', 'Manifest must be an object');
       if (url !== undefined) { if (url.length > 8192) throw new ServiceError(400, 'INVALID_URL', 'URL too long'); await downloadImage(url, input, config); }
       const inputInfo = await validateImage(input, config.maxPixels);
       // Give the upstream file-based provenance readers a truthful extension without re-encoding.

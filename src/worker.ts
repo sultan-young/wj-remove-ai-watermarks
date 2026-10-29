@@ -37,7 +37,6 @@ export class WorkerClient {
         HF_HUB_DISABLE_XET: process.env.HF_HUB_DISABLE_XET ?? '1',
         WORKER_MODE: this.config.workerMode, WORKER_INIT: JSON.stringify(engine),
         MAX_IMAGE_PIXELS: String(this.config.maxPixels),
-        ENABLE_TEXT_RESTORATION: String(this.config.textRestoration),
       },
     });
     this.child = child;

@@ -39,8 +39,8 @@ class AdapterTests(unittest.TestCase):
                 resolve_effective_profile=lambda pipeline, vendor: pipeline),
             "remove_ai_watermarks.identify": types.SimpleNamespace(has_invisible_target=lambda _: False),
         }
-        self.options = {"pipeline": "sdxl-zimage", "vendor": "auto", "strength": None, "seed": 0,
-                        "max_resolution": 0, "humanize": 0, "unsharp": 0, "adaptive_polish": "default",
+        self.options = {"pipeline": "sdxl-zimage", "vendor": "auto", "strength": None, "seed": None,
+                        "max_resolution": 0, "humanize": 0, "unsharp": 0, "adaptive_polish": None,
                         "tile": False, "tile_size": 1024, "tile_overlap": 128, "force": True,
                         "fidelity_anchor": False}
 
@@ -49,7 +49,7 @@ class AdapterTests(unittest.TestCase):
 
     def run_with_stubs(self, callback):
         with patch.dict("sys.modules", self.modules), patch("importlib.metadata.version", return_value="0.47.1"):
-            return callback(RealAdapter({"pipeline": "sdxl-zimage", "controlnet_scale": 1, "cpu_offload": False}, lambda _: None))
+            return callback(RealAdapter({"pipeline": "sdxl-zimage", "controlnet_conditioning_scale": 1, "cpu_offload": False}, lambda _: None))
 
     def job(self):
         return {"input": str(self.source), "output": str(self.output), "options": {"processing": self.options}}
@@ -76,7 +76,7 @@ class AdapterTests(unittest.TestCase):
         self.assertFalse(self.output.exists())
 
     def test_explicit_vendor_overrides_gate(self):
-        self.options.update(force=False, vendor="google", adaptive_polish="off")
+        self.options.update(force=False, vendor="google", adaptive_polish=False)
         self.run_with_stubs(lambda adapter: adapter.process(self.job()))
         run = next(x[1] for x in self.calls if x[0] == "run")
         self.assertEqual(run["vendor"], "google")
@@ -84,8 +84,8 @@ class AdapterTests(unittest.TestCase):
 
     def test_visible_mode_does_not_run_diffusion(self):
         self.options["mode"] = "visible"
-        self.options["visible_mark"] = "strict"
-        self.options["visible_backend"] = "cv2"
+        self.options["sensitivity"] = "strict"
+        self.options["backend"] = "cv2"
 
         def visible(source, output, **kwargs):
             self.calls.append(("visible", kwargs))
@@ -105,6 +105,7 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(self.calls[-1][0], "visible")
         self.assertEqual(self.calls[-1][1]["sensitivity"], "strict")
         self.assertNotIn("mark", self.calls[-1][1])
+        self.assertFalse(self.calls[-1][1]["write_noop"])
         self.assertEqual(self.calls[-1][1]["backend"], "cv2")
 
     def test_metadata_mode_copies_when_no_ai_metadata(self):
@@ -123,7 +124,8 @@ class AdapterTests(unittest.TestCase):
         self.assertFalse(any(item[0] == "init" for item in self.calls))
 
     def test_unknown_visible_mark_is_rejected(self):
-        self.options.update(mode="visible", visible_mark="loose")
+        self.options.update(mode="visible", mark="loose")
+        self.modules["remove_ai_watermarks"].watermark_registry = types.SimpleNamespace(mark_keys=lambda: ["gemini"])
 
         def visible(*_args, **_kwargs):
             raise AssertionError("visible removal should not run")
@@ -132,6 +134,80 @@ class AdapterTests(unittest.TestCase):
         with self.assertRaises(AdapterError) as error:
             self.run_with_stubs(lambda adapter: adapter.process(self.job()))
         self.assertEqual(error.exception.code, "INVALID_OPTIONS")
+        self.assertFalse(self.output.exists())
+
+    def test_visible_mode_without_a_mark_writes_nothing(self):
+        self.options["mode"] = "visible"
+
+        def visible(source, output, **kwargs):
+            self.calls.append(("visible", kwargs))
+            if kwargs.get("write_noop", True):
+                Image.open(source).save(output, format="PNG")
+            return types.SimpleNamespace(status="no_watermark", labels=[], marks=[])
+
+        self.modules["remove_ai_watermarks"].remove_visible_detailed = visible
+        with self.assertRaises(AdapterError) as error:
+            self.run_with_stubs(lambda adapter: adapter.process(self.job()))
+        self.assertEqual(error.exception.code, "NO_VISIBLE_MARK")
+        self.assertFalse(self.output.exists())
+        self.assertFalse(self.calls[-1][1]["write_noop"])
+
+    def test_explicit_mark_can_skip_detection(self):
+        self.options.update(mode="visible", mark="gemini", detect=False, backend="cv2")
+        removed = []
+
+        class Mark:
+            key, label = "gemini", "Google Gemini visible watermark (sparkle)"
+            def detect(self, image, provenance=False):
+                return types.SimpleNamespace(detected=False, confidence=0.1)
+            def remove(self, image, **kwargs):
+                removed.append(kwargs)
+                return image, None
+
+        def write_bgr_with_alpha(path, _image, _alpha, **_kwargs):
+            Image.open(self.source).save(path, format="PNG")
+            return True
+
+        package = self.modules["remove_ai_watermarks"]
+        package.watermark_registry = types.SimpleNamespace(
+            mark_keys=lambda: ["gemini"], get_mark=lambda _key: Mark(),
+            resolve_trust=lambda *_args, **_kwargs: "strict",
+        )
+        package.image_io = types.SimpleNamespace(
+            read_bgr_and_alpha=lambda _path: ("pixels", None), write_bgr_with_alpha=write_bgr_with_alpha,
+        )
+        package.api = types.SimpleNamespace(visible_provenance=lambda _path: frozenset())
+
+        def execute(adapter):
+            result = adapter.process(self.job())
+            self.assertIsNone(result["visible_status"])
+            self.assertEqual(result["visible_marks"], ["Google Gemini visible watermark (sparkle)"])
+            self.assertTrue(self.output.exists())
+        self.run_with_stubs(execute)
+        self.assertEqual(removed[0]["force"], True)
+        self.assertEqual(removed[0]["backend"], "cv2")
+
+    def test_explicit_mark_not_detected_writes_nothing(self):
+        self.options.update(mode="visible", mark="gemini", detect=True)
+
+        class Mark:
+            key, label = "gemini", "Google Gemini visible watermark (sparkle)"
+            def detect(self, image, provenance=False):
+                return types.SimpleNamespace(detected=False, confidence=0.2)
+            def remove(self, image, **kwargs):
+                raise AssertionError("removal should not run")
+
+        package = self.modules["remove_ai_watermarks"]
+        package.watermark_registry = types.SimpleNamespace(
+            mark_keys=lambda: ["gemini"], get_mark=lambda _key: Mark(),
+            resolve_trust=lambda *_args, **_kwargs: "strict",
+        )
+        package.image_io = types.SimpleNamespace(read_bgr_and_alpha=lambda _path: ("pixels", None))
+        package.api = types.SimpleNamespace(visible_provenance=lambda _path: frozenset())
+        with self.assertRaises(AdapterError) as error:
+            self.run_with_stubs(lambda adapter: adapter.process(self.job()))
+        self.assertEqual(error.exception.code, "NO_VISIBLE_MARK")
+        self.assertFalse(self.output.exists())
 
     def test_all_mode_without_signal_still_removes_visible_marks(self):
         self.options.update(mode="all", force=False)
@@ -147,7 +223,7 @@ class AdapterTests(unittest.TestCase):
             result = adapter.process(self.job())
             self.assertEqual(result["mode"], "all")
             self.assertEqual(result["visible_status"], "cleaned")
-            self.assertEqual(result["invisible"], "not_run")
+            self.assertEqual(result["invisible"], "no-signal")
             self.assertEqual(result["reason"], "NO_SIGNAL")
             self.assertTrue(self.output.exists())
         self.run_with_stubs(execute)
@@ -183,23 +259,26 @@ class AdapterTests(unittest.TestCase):
             self.assertEqual(result["vendor"], "openai")
         self.run_with_stubs(execute)
         self.assertEqual(seen, [str(self.source)])
-        self.assertTrue(any(item[0] == "visible" for item in self.calls))
+        visible_call = next(item for item in self.calls if item[0] == "visible")
+        self.assertTrue(visible_call[1]["write_noop"])
         self.assertTrue(any(item[0] == "run" for item in self.calls))
 
-    def test_text_manifest_is_bound_to_the_image_entering_diffusion(self):
-        from adapter import bind_text_manifest
+    def test_text_manifest_is_passed_through_unchanged(self):
         manifest = self.output.with_name("manifest.json")
-        manifest.write_text(json.dumps({
-            "lines": [{"box": [0, 10, 8, 20]}, {"box": [1, 1, 4, 6]}],
-        }), encoding="utf-8")
-        bind_text_manifest(self.source, manifest)
-        payload = json.loads(manifest.read_text(encoding="utf-8"))
-        self.assertEqual(payload["schema_version"], 2)
-        self.assertTrue(payload["verified"])
-        self.assertEqual(payload["width"], 32)
-        self.assertEqual(payload["height"], 24)
-        self.assertEqual(payload["lines"][0]["box"], [1, 1, 4, 6])
-        self.assertEqual(len(payload["source_pixel_sha256"]), 64)
+        original = {"schema_version": 1, "verified": True, "lines": [{"box": [1, 1, 4, 6], "text": "店", "script": "Hans", "angle": 12}]}
+        manifest.write_text(json.dumps(original), encoding="utf-8")
+        job = self.job()
+        job["manifest"] = str(manifest)
+
+        def execute(adapter):
+            adapter.process(job)
+        self.run_with_stubs(execute)
+        run = next(item[1] for item in self.calls if item[0] == "run")
+        self.assertEqual(run["text_manifest"], manifest)
+        self.assertEqual(json.loads(manifest.read_text(encoding="utf-8")), original)
+        self.assertIsNone(run["strength"])
+        self.assertIsNone(run["seed"])
+        self.assertIsNone(run["adaptive_polish"])
 
     def test_version_guard(self):
         with patch("importlib.metadata.version", return_value="9.0.0"):

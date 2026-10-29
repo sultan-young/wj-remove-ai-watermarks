@@ -32,33 +32,36 @@ URL 必须直接返回图片字节，不是分享页面。支持签名查询参�
 
 `options` 是严格对象，未知字段会报错，不会静默忽略。
 
-| processing 字段 | 默认值 | 含义 |
+| processing 字段 | 默认值 | 与上游的对应 |
 |---|---|---|
-| pipeline | DEFAULT_PIPELINE | sdxl-zimage / qwen-zimage / chroma-zimage / auto，须被服务启用 |
-| vendor | auto | auto / openai / google / microsoft / meta |
-| strength | null | null 跟随上游策略；显式 0–1 |
-| seed | 0 | 0–4294967295 的整数 |
-| max_resolution | 0 | 0 原生；正整数限制内部长边；最终恢复输入显示尺寸 |
-| controlnet_scale | 1 | 结构约束，服务允许 0–2；部分 pipeline 不使用 |
-| adaptive_polish | default | default / on / off |
-| humanize | 0 | 颗粒，服务允许 0–10 |
-| unsharp | 0 | 锐化，服务允许 0–5 |
-| tile | false | 是否分块 |
-| tile_size | 1024 | 256–4096，8 的倍数 |
-| tile_overlap | 128 | 0–2048，8 的倍数，小于 tile_size |
-| cpu_offload | false | 按上游支持降低显存，通常更慢 |
-| force | true | 已知需要处理时强制执行。invisible 在 false 且无本地信号时 NO_SIGNAL；all 仍返回可见处理结果，并标明隐形重建未执行 |
-| visible_mark | auto | auto / strict。其他值直接拒绝 |
-| fidelity_anchor | false | 实验性，仅 qwen-zimage 且需要 text_manifest，默认关闭 |
+| pipeline | qwen-zimage | `--pipeline`。qwen-zimage / sdxl-zimage / chroma-zimage / auto。没启用的 profile 会拒绝，不会改成别的 |
+| vendor | auto | `--vendor`。auto 交给上游从原文件解析；显式值同时表示执行隐形重建 |
+| strength | null | `--strength`。null 由上游按 profile 和 vendor 决定 |
+| seed | null | `--seed`。null 由上游使用认证种子 0 |
+| max_resolution | 0 | `--max-resolution`。0 表示原生尺寸 |
+| controlnet_conditioning_scale | 1 | 引擎参数，对应 `--controlnet-scale` |
+| adaptive_polish | null | `--adaptive-polish` / `--no-adaptive-polish`。null 表示不覆盖，由 profile 自己决定 |
+| humanize | 0 | `--humanize` |
+| unsharp | 0 | `--unsharp` |
+| tile | false | `--tile` |
+| tile_size | 1024 | `--tile-size` |
+| tile_overlap | 128 | `--tile-overlap` |
+| cpu_offload | false | `--cpu-offload` |
+| force | false | `--force`。false 且 vendor 为 auto、又没有本地信号时，invisible 返回 NO_SIGNAL。all 仍返回可见处理结果，`invisible` 为 `no-signal` |
+| mark | auto | `visible --mark`。auto 或注册表中的标记。all 只用 auto |
+| sensitivity | auto | `--sensitivity`。auto / strict |
+| detect | true | `--detect` / `--no-detect`。false 且 mark 为 auto 时与上游一样回落到 gemini |
+| backend | auto | `visible --backend`。auto / cv2 / migan / lama |
+| fidelity_anchor | false | `--fidelity-anchor` |
 
-`text_manifest` 是顶层 JSON 对象（JSON 提交），或 multipart 普通文本字段中的 JSON。不是服务器任意路径。需要 ENABLE_TEXT_RESTORATION=true，以及：
+`text_manifest` 是顶层 JSON 对象（JSON 提交），或 multipart 普通文本字段中的 JSON。服务按原样写入临时文件再交给上游，不改字段、不重算哈希。需要：
 
 ```bash
 # 在目标 Python 环境按需安装；不在普通启动阶段执行。
 /path/to/python -m pip install 'remove-ai-watermarks[text-restoration]==0.47.1'
 ```
 
-文字标注由操作人核验，必须绑定原图像素 hash。格式沿用上游 schema；服务限制原生尺寸、不分块、humanize/unsharp=0、polish 不为 on。自动 OCR 结果不等于核验。清单细节见上游 CLI 文档。
+清单是否合法由上游判断，包括 verified、像素哈希、angle 和与 humanize、unsharp、tile、adaptive_polish 的组合。自动 OCR 结果不等于核验。细节见上游 CLI 文档。
 
 所有图片都是像素重建，原生尺寸不代表无损。服务未实现独立的 --steps、--guidance-scale、--model，因为上游也不支持。HF token 是管理员配置，不是请求参数。
 
@@ -144,6 +147,7 @@ Content-Type: application/json
 | 503 DRAINING | 暂停接单 |
 | 任务 CUDA_OOM | 显存不足，降低并发或图片大小，必要时启用 offload/tile 后重新验证效果 |
 | 任务 WORKER_EXITED / TASK_TIMEOUT | Worker 中断或任务超时 |
-| 任务 NO_SIGNAL | invisible 模式下 force=false 且本地无目标信号；不代表无水印。all 模式改为成功并跳过隐形重建 |
+| 任务 NO_SIGNAL | invisible 模式下 force=false、vendor=auto 且本地无目标信号；不代表无水印。all 模式成功，effective.invisible 为 no-signal |
+| 任务 NO_VISIBLE_MARK | mode=visible 没有去掉已知可见标记。不把原图当作处理结果。all 模式没有可见标记时继续后面的阶段 |
 
 多张图片每张提交一个任务。无界可以并行提交，但实际计算并发只由服务 WORKER_CONCURRENCY 控制。

@@ -163,7 +163,7 @@ test('drain blocks new work but finishes accepted queued tasks; worker PID is re
   } finally { await s.close(); }
 });
 
-test('URL redirects recheck destination port; multipart rejects conflicting sources and disabled manifests', async () => {
+test('URL redirects recheck destination port; multipart rejects conflicting sources and accepts a text manifest', async () => {
   const origin = createServer((_request, response) => { response.writeHead(302, { location: 'http://127.0.0.1:1/private' }); response.end(); });
   await new Promise<void>(resolve => origin.listen(0, '127.0.0.1', resolve));
   const port = (origin.address() as any).port;
@@ -171,14 +171,16 @@ test('URL redirects recheck destination port; multipart rejects conflicting sour
   try {
     const result = await s.app.inject({ method: 'POST', url: '/v1/jobs', headers: auth, payload: { url: `http://127.0.0.1:${port}` } });
     assert.equal(result.statusCode, 400); assert.equal(result.json().error.code, 'URL_PORT_BLOCKED');
-    for (const field of ['url', 'text_manifest']) {
-      const form = new FormData(); form.append('file', new Blob([new Uint8Array(png)]), 'test.png');
-      form.append(field, field === 'url' ? 'https://example.com/test.png' : '{"verified":true}');
-      const request = new Request('http://localhost', { method: 'POST', body: form });
-      const rejected = await s.app.inject({ method: 'POST', url: '/v1/jobs', headers: { ...auth, 'content-type': request.headers.get('content-type')! }, payload: Buffer.from(await request.arrayBuffer()) });
-      assert.equal(rejected.statusCode, 400);
-    }
-    assert.equal(s.manager.jobs.size, 0);
+    const form = new FormData(); form.append('file', new Blob([new Uint8Array(png)]), 'test.png');
+    form.append('url', 'https://example.com/test.png');
+    const request = new Request('http://localhost', { method: 'POST', body: form });
+    const rejected = await s.app.inject({ method: 'POST', url: '/v1/jobs', headers: { ...auth, 'content-type': request.headers.get('content-type')! }, payload: Buffer.from(await request.arrayBuffer()) });
+    assert.equal(rejected.statusCode, 400);
+    const manifest = new FormData(); manifest.append('file', new Blob([new Uint8Array(png)]), 'test.png');
+    manifest.append('text_manifest', '{"verified":true,"lines":[{"box":[0,0,1,1],"angle":12}]}');
+    const manifestRequest = new Request('http://localhost', { method: 'POST', body: manifest });
+    const accepted = await s.app.inject({ method: 'POST', url: '/v1/jobs', headers: { ...auth, 'content-type': manifestRequest.headers.get('content-type')! }, payload: Buffer.from(await manifestRequest.arrayBuffer()) });
+    assert.equal(accepted.statusCode, 202, accepted.body);
   } finally { await s.close(); origin.closeAllConnections(); await new Promise<void>(resolve => origin.close(() => resolve())); }
 });
 
@@ -187,10 +189,10 @@ test('engine-level configuration change restarts worker and records selected con
   try {
     await until(() => s.manager.slots[0]!.client.ready, Boolean);
     const pid = s.manager.slots[0]!.client.child!.pid;
-    const a = (await upload(s.app, { processing: { controlnet_scale: 1.2 } })).json();
+    const a = (await upload(s.app, { processing: { controlnet_conditioning_scale: 1.2 } })).json();
     assert.equal((await final(s.app, a.id)).status, 'succeeded');
     assert.notEqual(s.manager.slots[0]!.client.child!.pid, pid);
-    assert.equal((s.manager.slots[0]!.client.info.engine as any).controlnet_scale, 1.2);
+    assert.equal((s.manager.slots[0]!.client.info.engine as any).controlnet_conditioning_scale, 1.2);
   } finally { await s.close(); }
 });
 
@@ -214,10 +216,17 @@ test('upload limits, pixel limits, manifests and invalid options reject before p
   try { assert.equal((await upload(t.app)).statusCode, 422); }
   finally { await t.close(); }
   const config = loadConfig({ API_KEY: key });
-  assert.throws(() => parseOptions({ processing: { tile_overlap: 1024 } }, config));
-  assert.throws(() => parseOptions({ processing: { visible_mark: 'loose' } }, config));
-  assert.equal(parseOptions({ processing: { visible_mark: 'strict' } }, config).processing.visible_mark, 'strict');
-  assert.throws(() => parseOptions({ processing: { pipeline: 'qwen-zimage' } }, config));
+  assert.equal(parseOptions({ processing: { tile_overlap: 1024 } }, config).processing.tile_overlap, 1024);
+  assert.throws(() => parseOptions({ processing: { mark: 'loose' } }, config));
+  assert.equal(parseOptions({ processing: { sensitivity: 'strict' } }, config).processing.sensitivity, 'strict');
+  assert.equal(parseOptions({ processing: { mark: 'gemini', detect: false } }, config).processing.detect, false);
+  assert.equal(parseOptions({}, config).processing.force, false);
+  assert.equal(parseOptions({}, config).processing.seed, null);
+  assert.equal(parseOptions({}, config).processing.adaptive_polish, null);
+  assert.equal(parseOptions({}, config).processing.pipeline, 'qwen-zimage');
+  assert.throws(() => parseOptions({ processing: { mode: 'all', mark: 'gemini' } }, config));
+  const restricted = loadConfig({ API_KEY: key, ENABLED_PIPELINES: 'sdxl-zimage' });
+  assert.throws(() => parseOptions({}, restricted));
   assert.throws(() => loadConfig({ API_KEY: key, WORKER_CONCURRENCY: '0' }));
   assert.equal(loadConfig({ API_KEY: key, WORKER_CONCURRENCY: '2' }).concurrency, 2);
 });

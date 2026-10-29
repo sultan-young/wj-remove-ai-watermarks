@@ -26,8 +26,7 @@ PYTHON_BIN=/root/raiw-test/.venv/bin/python
 HF_HOME=/root/raiw-test/model-cache
 WORKER_MODE=real
 MODEL_OFFLINE=true
-DEFAULT_PIPELINE=sdxl-zimage
-ENABLED_PIPELINES=sdxl-zimage
+ENABLED_PIPELINES=qwen-zimage,sdxl-zimage,chroma-zimage,auto
 WORKER_CONCURRENCY=1
 GPU_DEVICES=0
 ```
@@ -97,11 +96,13 @@ Worker 按 GPU_DEVICES 轮询分配；并发为 2、只写 `GPU_DEVICES=0` 就�
 
 - POST `/v1/jobs` 使用 multipart 的 `file + options`，或 JSON 的 `url + options`，二选一。
 - 立即进入异步计算队列；URL 提交会先完成受限下载和图片验证，再返回任务 ID，因此提交请求本身最长可能需要 URL_TIMEOUT_MS。
-- 默认 `force=true`，明确执行重建。`invisible` 在 `force=false`、无显式 vendor、无本地信号时以 `NO_SIGNAL` 失败，不生成扩散假结果。`all` 仍会先去掉可见水印；隐形重建被拒绝时任务成功，`effective.invisible` 为 `not_run`。
+- 处理参数的名字、默认值和取值与上游 0.47.1 一致，服务不改写后再交给引擎。`force` 默认 false。没写 `pipeline` 时是 `qwen-zimage`。`strength`、`seed`、`adaptive_polish` 省略时分别是 null、null、null，由上游自己决定。
+- `invisible` 在 `force=false`、vendor 为 auto、无本地信号时以 `NO_SIGNAL` 失败，不生成扩散结果。`all` 仍会先去掉可见水印；没有隐形信号时任务成功，`effective.invisible` 为 `no-signal`。
+- `mode=visible` 使用上游的 `mark`、`sensitivity`、`detect`、`backend`。没有去掉标记时返回 `NO_VISIBLE_MARK`，不交付原图。`detect=false` 且 `mark=auto` 时与上游命令一样回落到 gemini。
 - 支持 PNG/JPEG/WebP 单帧图片；保留上传字节，不在上传阶段重新编码。输出 PNG，恢复按 EXIF 正向显示的输入尺寸。
-- pipeline、controlnet_scale、cpu_offload 改变时，重启对应 Worker 再加载模型；同配置任务复用引擎。
+- pipeline、controlnet_conditioning_scale、cpu_offload 改变时，重启对应 Worker 再加载模型；同配置任务复用引擎。
 - `auto` 使用上游来源路由；可能需要多个模型缓存，建议先逐个准备并验证具体 pipeline，再启用 auto。
-- 文字修复需要显式开启 `ENABLE_TEXT_RESTORATION`、安装上游额外依赖，并提交已核验的 `text_manifest`；默认不启用。
+- `text_manifest` 原样交给上游。需要上游的 text-restoration 额外依赖；服务不改清单、不另设开关。
 - 返回 requested options 与 effective 参数，便于复现。`progress` 没有准确数据时为 null。
 
 完整接口及示例：[docs/API.md](docs/API.md)。Node.js 客户端：[examples/client.mjs](examples/client.mjs)。
