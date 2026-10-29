@@ -31,9 +31,13 @@ def main():
             channel.write(json.dumps({"protocol": 1, "type": kind, **payload}, ensure_ascii=False) + "\n")
             channel.flush()
 
-    def progress(stage):
-        if current["id"]:
-            emit("stage", job_id=current["id"], stage=stage)
+    def progress(stage, detail=None):
+        if not current["id"]:
+            return
+        payload = {"job_id": current["id"], "stage": stage}
+        if detail:
+            payload["detail"] = detail
+        emit("stage", **payload)
 
     try:
         config = json.loads(os.environ["WORKER_INIT"])

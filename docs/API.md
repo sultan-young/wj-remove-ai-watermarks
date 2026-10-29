@@ -79,7 +79,22 @@ URL 必须直接返回图片字节，不是分享页面。支持签名查询参�
   "options": {"processing": {}},
   "effective": {"pipeline":"sdxl-zimage","vendor":"openai","strength":0.15,"verification":"not_performed"},
   "input": {"width":2048,"height":2048,"format":"png"},
-  "elapsed_seconds": 20.0,
+  "created_at": "2026-10-29T10:00:00.000Z",
+  "started_at": "2026-10-29T10:00:01.000Z",
+  "finished_at": "2026-10-29T10:04:20.000Z",
+  "stage_started_at": "2026-10-29T10:04:19.500Z",
+  "queue_wait_seconds": 1.0,
+  "elapsed_seconds": 259.0,
+  "stages": [
+    {"stage":"queued","started_at":"…","finished_at":"…","duration_seconds":1.0},
+    {"stage":"preparing","started_at":"…","finished_at":"…","duration_seconds":0.4},
+    {"stage":"routing","started_at":"…","finished_at":"…","duration_seconds":0.2},
+    {"stage":"global_pass","started_at":"…","finished_at":"…","duration_seconds":230.0,"detail":{"label":"Running Qwen… Canny pass","step":4,"steps":4}},
+    {"stage":"detecting_faces","started_at":"…","finished_at":"…","duration_seconds":0.5},
+    {"stage":"face_pass","started_at":"…","finished_at":"…","duration_seconds":12.0,"detail":{"face_index":1,"face_count":2}},
+    {"stage":"validating_output","started_at":"…","finished_at":"…","duration_seconds":0.3},
+    {"stage":"completed","started_at":"…","finished_at":"…","duration_seconds":0.0}
+  ],
   "error": null,
   "result": {
     "width":2048,"height":2048,"format":"png","bytes":123456,
@@ -91,9 +106,17 @@ URL 必须直接返回图片字节，不是分享页面。支持签名查询参�
 }
 ```
 
-此处参数/耗时只是格式示例，不是性能承诺。elapsed_seconds 从调度执行开始计时，包含任务触发的模型切换及输出校验，不包含排队、初始上传和 URL 下载。首次启动的预加载时间由 readiness 单独反映。
+此处参数/耗时只是格式示例，不是性能承诺。
 
-状态：queued / running / succeeded / failed / cancelled。运行阶段来自 Worker 的真实回调；不把阶段拼成虚假的百分比。
+- `elapsed_seconds`：从调度执行开始到结束（或当前），含模型切换与输出校验；不含排队、上传、URL 下载。
+- `queue_wait_seconds`：入队到开始执行的等待。
+- `stages`：当次任务的阶段时间线（入队即含 `queued`）。同名阶段在未结束时只更新 `detail`（如 tqdm 的 `step/steps`）；`face_pass` 换脸会追加新条目。当前未完成阶段的 `finished_at` / `duration_seconds` 为 null。
+- `progress`：仅当当前阶段为 `global_pass` / `face_pass` 且带有可靠的 `step/steps` 时为 `{ "step", "steps" }`，否则为 null（模型权重加载条不会当作进度）；不编造百分比。
+- `GET /v1/capabilities` 含 `timing_stages: true` 与 `known_stages` 字符串枚举（勿与 job 的 `stages` 时间线混淆）。
+
+常见阶段：`queued`、`preparing`、`loading_models`、`routing`、`visible`、`metadata`、`global_pass`、`detecting_faces`、`loading_face_models`、`face_pass`、`postprocessing`、`text_restoration`、`mock_processing`、`validating_output`、`completed` / `failed` / `cancelled`。上游只提供文案回调时，细分阶段是尽力映射。
+
+状态：queued / running / succeeded / failed / cancelled。
 
 `GET /v1/jobs/{id}/result` 返回 PNG 二进制，带 `X-Worker-Mode: real|mock`。未完成返回 409，过期 410，会话丢失或记录删除后 404。已完成结果可重复下载。
 

@@ -11,6 +11,7 @@ import { requestOptionsSchema, parseOptions } from './options.js';
 import { ServiceError } from './errors.js';
 import { saveLimited, validateImage } from './images.js';
 import { downloadImage } from './download.js';
+import { beginStage, KNOWN_STAGES } from './stages.js';
 
 export async function buildApp(config: Config) {
   const app = Fastify({ logger: { level: config.logLevel, redact: ['req.headers.authorization', 'req.body.url'] },
@@ -54,6 +55,8 @@ export async function buildApp(config: Config) {
     visible_marks: visibleMarks,
     output: { format: 'png', retains_input_dimensions: true, ttl_seconds: config.retentionMs / 1000 },
     limits_are_service_limits: true,
+    timing_stages: true,
+    known_stages: [...KNOWN_STAGES],
     options_schema: z.toJSONSchema(requestOptionsSchema, { target: 'draft-7', io: 'input' }),
     workers: manager.status().workers,
     verification: 'Processing success is not a provider watermark-verification verdict',
@@ -114,8 +117,9 @@ export async function buildApp(config: Config) {
       if (manifest !== undefined) { manifestPath = path.join(dir, 'text-manifest.json'); await writeFile(manifestPath, JSON.stringify(manifest), { mode: 0o600 }); }
       const fingerprint = createHash('sha256').update(await readFile(input)).update(JSON.stringify(options)).update(JSON.stringify(manifest ?? null)).digest('hex');
       const job: Job = { id: created.id, dir, input, output: path.join(dir, 'result.png'), manifest: manifestPath,
-        status: 'queued', stage: 'queued', options, source: hasFile ? 'upload' : 'url', created: Date.now(), inputInfo,
+        status: 'queued', stage: 'queued', stages: [], options, source: hasFile ? 'upload' : 'url', created: Date.now(), inputInfo,
         expired: false, downloads: 0, cancelRequested: false };
+      beginStage(job, 'queued');
       const result = manager.enqueue(job, key, fingerprint);
       retained = !result.reused;
       return reply.code(result.reused ? 200 : 202).send({ ...manager.view(result.job), reused: result.reused });

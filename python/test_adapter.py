@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 from PIL import Image
-from adapter import RealAdapter, AdapterError
+from adapter import RealAdapter, AdapterError, parse_progress_message, stage_from_message
 
 
 class AdapterTests(unittest.TestCase):
@@ -291,6 +291,28 @@ class AdapterTests(unittest.TestCase):
         with patch("importlib.metadata.version", return_value="9.0.0"):
             with self.assertRaises(AdapterError):
                 RealAdapter({}, print)
+
+
+class ProgressMessageTests(unittest.TestCase):
+    def test_maps_upstream_lines(self):
+        self.assertEqual(stage_from_message("Loading Qwen-Image-2512..."), "loading_models")
+        self.assertEqual(stage_from_message("Loading SAM face-mask model..."), "loading_face_models")
+        self.assertEqual(stage_from_message("Loading Z-Image Turbo face-detail model..."), "loading_face_models")
+        self.assertEqual(stage_from_message("Detecting faces on the original image..."), "detecting_faces")
+        stage, detail = parse_progress_message("Regenerating face 2/2 with Z-Image: strength=0.03, steps=8...")
+        self.assertEqual(stage, "face_pass")
+        self.assertEqual(detail["face_index"], 2)
+        self.assertEqual(detail["face_count"], 2)
+        stage, detail = parse_progress_message("Running Qwen-Image-2512 Canny pass: strength=0.1562, steps=4...")
+        self.assertEqual(stage, "global_pass")
+        self.assertIn("Canny", detail["label"])
+
+    def test_tqdm_only_returns_detail_without_stage(self):
+        parsed = parse_progress_message("\r 50%|█████     | 2/4 [00:07<00:06,  3.19s/it]")
+        self.assertIsNotNone(parsed)
+        stage, detail = parsed
+        self.assertIsNone(stage)
+        self.assertEqual(detail, {"step": 2, "steps": 4})
 
 
 if __name__ == "__main__":

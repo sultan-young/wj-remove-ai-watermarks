@@ -2,7 +2,7 @@
 
 ## 进程与状态
 
-一个 Node.js/Fastify 进程负责所有 HTTP 接口、内存队列、幂等映射、TTL 清理；N 个 Python 子进程各自持有一个模型引擎。N = WORKER_CONCURRENCY。无 SQLite、Redis，无自动跨机器调度。
+一个 Node.js/Fastify 进程负责所有 HTTP 接口、内存队列、幂等映射、TTL 清理与任务阶段计时；N 个 Python 子进程各自持有一个模型引擎。N = WORKER_CONCURRENCY。无 SQLite、Redis，无自动跨机器调度。Worker 通过 FD3 上报 `stage`（可带 `detail`）；Node 维护 `stages[]` 墙钟，供 `GET /v1/jobs/{id}` 展示。
 
 Node 通过 child_process.spawn 启动 Python；stdin 传 JSON Lines 命令，FD 3 返回版本化 JSON Lines 事件，stdout/stderr 收集库日志。图片本身保存在服务生成的 UUID 目录内，只向 Worker 传服务生成的绝对路径。调用者不能指定服务器输入/输出路径或 Python 命令。
 

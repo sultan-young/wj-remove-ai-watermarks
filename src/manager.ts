@@ -6,10 +6,13 @@ import { engineConfig, type Options } from './options.js';
 import { ServiceError } from './errors.js';
 import { WorkerClient, WorkerFailure } from './worker.js';
 import { validateImage } from './images.js';
+import {
+  beginStage, finishOpenStage, progressFromStages, publicStages, sealStage, type StageClock, type StageDetail,
+} from './stages.js';
 
 type State = 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled';
-export type Job = {
-  id: string; status: State; stage: string; dir: string; input: string; output: string;
+export type Job = StageClock & {
+  id: string; status: State; dir: string; input: string; output: string;
   manifest?: string; options: Options; source: 'upload' | 'url';
   created: number; started?: number; finished?: number; inputInfo: { width: number; height: number; format: string };
   error?: { code: string; message: string }; effective?: unknown;
@@ -67,10 +70,14 @@ export class Manager {
   }
   view(job: Job) {
     const { id, status, stage, options, source, error, effective, result, expired, inputInfo } = job;
-    return { id, status, stage, progress: null, source, options, effective: effective ?? null, input: inputInfo,
+    const now = Date.now();
+    return { id, status, stage, progress: progressFromStages(job), source, options, effective: effective ?? null, input: inputInfo,
       created_at: new Date(job.created).toISOString(), started_at: job.started ? new Date(job.started).toISOString() : null,
       finished_at: job.finished ? new Date(job.finished).toISOString() : null,
-      elapsed_seconds: job.started ? ((job.finished ?? Date.now()) - job.started) / 1000 : null,
+      stage_started_at: job.stageStartedAt ? new Date(job.stageStartedAt).toISOString() : null,
+      queue_wait_seconds: job.started ? (job.started - job.created) / 1000 : (now - job.created) / 1000,
+      elapsed_seconds: job.started ? ((job.finished ?? now) - job.started) / 1000 : null,
+      stages: publicStages(job),
       error: error ?? null, result: result ? { ...result, expired, downloaded_at: job.downloadedAt ? new Date(job.downloadedAt).toISOString() : null,
         acknowledged_at: job.acknowledgedAt ? new Date(job.acknowledgedAt).toISOString() : null,
         download_path: `/v1/jobs/${id}/result` } : null,
@@ -91,7 +98,10 @@ export class Manager {
   cancel(id: string) {
     const job = this.get(id);
     if (job.status === 'queued') {
-      this.queue = this.queue.filter(x => x !== id); job.status = 'cancelled'; job.stage = 'cancelled'; job.finished = Date.now();
+      this.queue = this.queue.filter(x => x !== id);
+      job.status = 'cancelled';
+      sealStage(job, 'cancelled');
+      job.finished = Date.now();
     } else if (job.status === 'running') {
       job.cancelRequested = true;
       // Stop only this slot. Other workers keep running. A model reload is necessary afterwards.
@@ -123,18 +133,25 @@ export class Manager {
       if (!id) continue;
       const job = this.jobs.get(id)!;
       slot.busy = true; (slot as Slot & { jobId?: string }).jobId = id;
-      job.status = 'running'; job.stage = 'preparing'; job.started = Date.now();
+      job.status = 'running'; job.started = Date.now();
+      beginStage(job, 'preparing');
       void this.execute(slot, job).finally(() => { slot.busy = false; (slot as Slot & { jobId?: string }).jobId = undefined; this.pump(); });
     }
+  }
+  private applyWorkerStage(job: Job, event: { stage?: unknown; detail?: unknown }) {
+    if (typeof event.stage !== 'string' || !event.stage.trim()) return;
+    const detail = event.detail && typeof event.detail === 'object' && !Array.isArray(event.detail)
+      ? event.detail as StageDetail : undefined;
+    beginStage(job, event.stage, detail);
   }
   private async execute(slot: Slot, job: Job) {
     try {
       const mode = job.options.processing.mode;
       const engine = mode === 'metadata' || mode === 'visible' ? null : engineConfig(job.options);
       const event = await slot.client.run({ id: job.id, input: job.input, output: path.join(job.dir, 'result.tmp.png'), manifest: job.manifest, options: job.options },
-        engine, event => { if (event.type === 'stage' && typeof event.stage === 'string') job.stage = event.stage; });
+        engine, event => { if (event.type === 'stage') this.applyWorkerStage(job, event); });
       if (job.cancelRequested) throw new Error('Cancelled');
-      job.stage = 'validating_output';
+      beginStage(job, 'validating_output');
       const tmp = path.join(job.dir, 'result.tmp.png');
       const info = await validateImage(tmp, this.config.maxPixels);
       if (info.format !== 'png' || info.width !== job.inputInfo.width || info.height !== job.inputInfo.height) throw new Error('Unexpected output geometry or format');
@@ -144,21 +161,25 @@ export class Manager {
       await rename(tmp, job.output);
       if (job.cancelRequested) { await rm(job.output, { force: true }); throw new Error('Cancelled'); }
       job.effective = event.effective; job.result = { ...info, bytes: size, sha256 };
-      job.status = 'succeeded'; job.stage = 'completed';
+      job.status = 'succeeded';
+      sealStage(job, 'completed');
     } catch (error) {
       const code = error instanceof WorkerFailure ? error.code : 'PROCESSING_FAILED';
       this.log(`job ${job.id}: ${code}: ${error instanceof Error ? error.message : String(error)}`);
-      job.status = job.cancelRequested ? 'cancelled' : 'failed'; job.stage = job.status;
+      job.status = job.cancelRequested ? 'cancelled' : 'failed';
+      sealStage(job, job.status);
       if (!job.cancelRequested) job.error = { code, message: 'Processing failed; inspect server logs with this task ID' };
       await rm(path.join(job.dir, 'result.tmp.png'), { force: true }).catch(() => {});
-    } finally { job.finished = Date.now(); }
+    } finally { job.finished = Date.now(); finishOpenStage(job); }
   }
   async cleanup() {
     const now = Date.now();
     this.queue = this.queue.filter(id => {
       const job = this.jobs.get(id)!;
       if (now - job.created < this.config.queueTimeoutMs) return true;
-      job.status = 'failed'; job.stage = 'failed'; job.finished = now;
+      job.status = 'failed';
+      sealStage(job, 'failed', now);
+      job.finished = now;
       job.error = { code: 'QUEUE_TIMEOUT', message: 'Task exceeded queue wait limit; check worker readiness' };
       return false;
     });

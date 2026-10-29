@@ -1,6 +1,7 @@
 """Thin adapter for the exact remove-ai-watermarks 0.47.1 Python interface."""
 import importlib.metadata
 import os
+import re
 import shutil
 import time
 from pathlib import Path
@@ -8,6 +9,8 @@ from PIL import Image, ImageOps
 
 
 _UNRESOLVED = object()
+_TQDM_STEP = re.compile(r"(\d+)\s*/\s*(\d+)\s*\[")
+_FACE_INDEX = re.compile(r"face\s+(\d+)\s*/\s*(\d+)", re.I)
 
 
 class AdapterError(Exception):
@@ -27,19 +30,56 @@ def inspect_image(path):
         return ImageOps.exif_transpose(image).size
 
 
-def stage_from_message(message):
-    lower = message.lower()
+def tqdm_detail(message):
+    match = _TQDM_STEP.search(message.replace("\r", " "))
+    if not match:
+        return {}
+    return {"step": int(match.group(1)), "steps": int(match.group(2))}
+
+
+def parse_progress_message(message):
+    """Map upstream progress_callback / stdout lines to (stage, detail) or None."""
+    text = str(message or "").strip()
+    if not text:
+        return None
+    lower = text.lower()
+    detail = tqdm_detail(text)
+    label = text[:200]
+
+    if any(token in lower for token in ("loading sam", "loading z-image", "loading weights", "face-mask", "face-detail")):
+        return "loading_face_models", {**detail, "label": label}
     if "loading" in lower:
-        return "loading_models"
+        return "loading_models", {**detail, "label": label}
     if "detecting faces" in lower:
-        return "detecting_faces"
+        return "detecting_faces", detail
+    face = _FACE_INDEX.search(lower)
+    if face and any(word in lower for word in ("running", "repair", "regenerat")):
+        return "face_pass", {
+            **detail,
+            "face_index": int(face.group(1)),
+            "face_count": int(face.group(2)),
+            "label": label,
+        }
     if "face" in lower and any(word in lower for word in ("running", "repair", "regenerat")):
-        return "face_pass"
+        return "face_pass", {**detail, "label": label}
+    if "text restoration" in lower or "text_manifest" in lower:
+        return "text_restoration", {**detail, "label": label}
     if any(word in lower for word in ("polish", "sharpen", "upscal", "grain")):
-        return "postprocessing"
+        return "postprocessing", {**detail, "label": label}
     if "running" in lower and "pass" in lower:
-        return "global_pass"
+        return "global_pass", {**detail, "label": label}
+    if detail:
+        return None, detail
     return None
+
+
+def stage_from_message(message):
+    """Backward-compatible stage name only."""
+    parsed = parse_progress_message(message)
+    if not parsed:
+        return None
+    stage, _detail = parsed
+    return stage
 
 
 def probe_optional_capabilities():
@@ -69,14 +109,25 @@ def probe_optional_capabilities():
     return visible, backends, marks
 
 
+def _bind_progress(progress):
+    """Accept progress(stage) or progress(stage, detail)."""
+    def emit(stage, detail=None):
+        try:
+            progress(stage, detail)
+        except TypeError:
+            progress(stage)
+    return emit
+
+
 class RealAdapter:
     def __init__(self, config, progress):
         version = importlib.metadata.version("remove-ai-watermarks")
         if version != "0.47.1":
             raise AdapterError("LIBRARY_VERSION_MISMATCH", f"Expected 0.47.1, found {version}")
-        self.progress = progress
+        self.progress = _bind_progress(progress)
         self.config = config
         self.engine = None
+        self._last_stage = None
         visible, backends, marks = probe_optional_capabilities()
         self.info = {
             "mode": "real", "library_version": version,
@@ -108,9 +159,16 @@ class RealAdapter:
 
     def _progress(self, message):
         print(message, flush=True)
-        stage = stage_from_message(message)
+        parsed = parse_progress_message(message)
+        if not parsed:
+            return
+        stage, detail = parsed
         if stage:
-            self.progress(stage)
+            self._last_stage = stage
+            self.progress(stage, detail or None)
+        elif detail and getattr(self, "_last_stage", None):
+            # tqdm-only lines: refresh step/steps on the open stage
+            self.progress(self._last_stage, detail)
 
     def process(self, job):
         p = job["options"]["processing"]
@@ -229,6 +287,7 @@ class RealAdapter:
     def _vendor_for_engine(self, source, processing):
         """force=false 时始终先查本地隐式信号；未找到则 NO_SIGNAL，不跑扩散。
         显式 vendor 只决定强度 cohort，不再等同于强制处理。force=true 才跳过信号检查。"""
+        self.progress("routing")
         requested = processing.get("vendor") or "auto"
         resolved = None if requested == "auto" else requested
         if not processing.get("force"):
@@ -293,7 +352,6 @@ class RealAdapter:
         width, height = inspect_image(source)
         profile = resolve_effective_profile(p["pipeline"], vendor)
         strength = resolve_strength(p["strength"], vendor, p["pipeline"], size=(width, height))
-        self.progress("processing")
         self._ensure_engine().remove_watermark(
             image_path=source, output_path=output,
             strength=p["strength"], seed=p["seed"], vendor=vendor,
@@ -317,7 +375,7 @@ class RealAdapter:
 class MockAdapter:
     """Transport/testing only. Copies decoded pixels; DOES NOT remove watermarks."""
     def __init__(self, config, progress):
-        self.config, self.progress = config, progress
+        self.config, self.progress = config, _bind_progress(progress)
         self.info = {
             "mode": "mock", "gpu": None, "engine": config, "warning": "MOCK: no watermark processing",
             "visible_available": True, "visible_backends": ["auto", "cv2", "migan", "lama"],

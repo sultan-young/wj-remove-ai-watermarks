@@ -54,6 +54,17 @@ test('upload -> persistent worker -> PNG download; auth, schema, idempotency and
     assert.equal((await upload(s.app, { processing: { strength: 0.2 } }, png, 'same-request')).statusCode, 409);
     const result = await final(s.app, id); assert.equal(result.status, 'succeeded'); assert.equal(result.result.width, 32);
     assert.equal(result.effective.mock, true); assert.equal(result.result.downloaded_at, null);
+    assert.ok(Array.isArray(result.stages));
+    assert.equal(result.stages[0]?.stage, 'queued');
+    assert.ok(result.stages.some((row: { stage: string }) => row.stage === 'mock_processing'));
+    assert.equal(result.stages.at(-1)?.stage, 'completed');
+    assert.ok(result.stages.every((row: { duration_seconds: number | null; finished_at: string | null }) =>
+      row.finished_at !== null && typeof row.duration_seconds === 'number'));
+    assert.equal(typeof result.queue_wait_seconds, 'number');
+    const caps = (await s.app.inject({ url: '/v1/capabilities', headers: auth })).json();
+    assert.equal(caps.timing_stages, true);
+    assert.ok(Array.isArray(caps.known_stages) && caps.known_stages.includes('global_pass'));
+    assert.equal(caps.stages, undefined);
     await s.app.inject({ method: 'POST', url: '/v1/drain', headers: auth, payload: { enabled: true } });
     assert.equal(s.manager.status().safe_to_stop, false);
     const image = await s.app.inject({ url: `/v1/jobs/${id}/result`, headers: auth });
