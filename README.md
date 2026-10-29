@@ -33,20 +33,29 @@ GPU_DEVICES=0
 
 `.env` 内有安装脚本生成的 `API_KEY`，请将同一密钥配置到无界后端。不要放到浏览器代码。
 
-5. 第一次前台启动观察日志：
+5. 启动服务（默认后台）：
 
 ```bash
 npm run start
 ```
 
-另开终端检查，下面命令仅打印就绪状态，不输出密钥：
+启动后立刻回到提示符，进程在后台跑，日志写入 `logs/service.log`。查看日志与就绪状态：
 
 ```bash
+tail -f logs/service.log
 cd /root/gpu-image-service
 node --input-type=module -e 'import "dotenv/config"; const r=await fetch("http://127.0.0.1:8000/health/ready",{headers:{Authorization:`Bearer ${process.env.API_KEY}`}}); console.log(r.status,await r.json())'
 ```
 
 模型未就绪返回 503；查看日志与 `/v1/status` 中的 `last_error`。`MODEL_OFFLINE=true` 时缺少模型会明确失败，不会自动在线下载。
+
+停止：
+
+```bash
+kill "$(cat .service.pid)"
+# 或
+pkill -f 'node dist/main.js'
+```
 
 6. 测试真实图片：
 
@@ -58,12 +67,6 @@ npm run smoke -- /root/raiw-test/input.png /root/gpu-image-service/output-servic
 
 ```bash
 npm run smoke -- 'https://your-storage.example/input.png' output-service.png
-```
-
-测试完毕按 Ctrl+C 停止前台服务，再后台启动：
-
-```bash
-nohup npm run start >> logs/service.log 2>&1 </dev/null &
 ```
 
 `npm run start` 使用 flock 防止同一个项目目录重复启动；重复启动退出 75，不会截断原日志。一个 DATA_DIR 只供一个服务实例使用，不使用 PM2 cluster。

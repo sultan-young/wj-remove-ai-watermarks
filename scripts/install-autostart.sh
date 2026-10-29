@@ -10,8 +10,7 @@ from pathlib import Path
 root = Path(sys.argv[1])
 script = Path('/start.d/90-gpu-image-service.sh')
 script.write_text('#!/usr/bin/env bash\nset -euo pipefail\n' +
-                  'nohup bash ' + shlex.quote(str(root / 'scripts/start.sh')) +
-                  ' >> ' + shlex.quote(str(root / 'logs/service.log')) + ' 2>&1 </dev/null &\n')
+                  'bash ' + shlex.quote(str(root / 'scripts/start.sh')) + '\n')
 script.chmod(0o755)
 print('Installed:', script)
 PY
