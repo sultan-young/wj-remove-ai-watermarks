@@ -51,7 +51,7 @@ kill "$(cat .service.pid)"
 pkill -f 'node dist/main.js'
 ```
 
-重复 `npm run start` 若已有实例在跑，会退出 75。重启前先停掉旧进程。
+重复 `npm run start` 会先停掉本目录里正在跑的实例，再重新启动。
 
 6. 测试真实图片：
 
@@ -65,7 +65,7 @@ npm run smoke -- /root/raiw-test/input.png /root/gpu-image-service/output-servic
 npm run smoke -- 'https://your-storage.example/input.png' output-service.png
 ```
 
-`npm run start` 使用 flock 防止同一个项目目录重复启动；重复启动退出 75，不会截断原日志。一个 DATA_DIR 只供一个服务实例使用，不使用 PM2 cluster。
+`npm run start` 使用 flock 保证同一项目目录同时只有一个实例；再次 start 会先结束旧进程再拉起新进程，日志追加到 `logs/service.log`。一个 DATA_DIR 只供一个服务实例使用，不使用 PM2 cluster。
 
 ## 对外访问
 

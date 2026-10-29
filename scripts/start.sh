@@ -14,6 +14,66 @@ fi
 mkdir -p logs
 command -v flock >/dev/null || { echo 'Install util-linux (flock)' >&2; exit 1; }
 
+stop_existing_service() {
+  local -a candidates=()
+  local p holders
+  if [[ -f .service.pid ]]; then
+    p=$(tr -d '[:space:]' < .service.pid || true)
+    if [[ "$p" =~ ^[0-9]+$ ]]; then
+      candidates+=("$p")
+    fi
+  fi
+  if command -v fuser >/dev/null 2>&1 && [[ -f .service.lock ]]; then
+    holders=$(fuser .service.lock 2>/dev/null || true)
+    for p in $holders; do
+      if [[ "$p" =~ ^[0-9]+$ ]]; then
+        candidates+=("$p")
+      fi
+    done
+  fi
+  if [[ ${#candidates[@]} -eq 0 ]]; then
+    rm -f .service.pid
+    return 0
+  fi
+  # Deduplicate.
+  local -A seen=()
+  local -a unique=()
+  for p in "${candidates[@]}"; do
+    if [[ -z ${seen[$p]+x} ]]; then
+      seen[$p]=1
+      unique+=("$p")
+    fi
+  done
+  for p in "${unique[@]}"; do
+    if kill -0 "$p" 2>/dev/null; then
+      echo "Stopping previous service (pid $p)…"
+      kill "$p" 2>/dev/null || true
+    fi
+  done
+  local i
+  for i in $(seq 1 30); do
+    local any=0
+    for p in "${unique[@]}"; do
+      if kill -0 "$p" 2>/dev/null; then
+        any=1
+        break
+      fi
+    done
+    [[ "$any" -eq 0 ]] && break
+    sleep 0.5
+  done
+  for p in "${unique[@]}"; do
+    if kill -0 "$p" 2>/dev/null; then
+      echo "Previous service pid $p did not exit; sending SIGKILL…"
+      kill -9 "$p" 2>/dev/null || true
+    fi
+  done
+  sleep 0.3
+  rm -f .service.pid
+}
+
+stop_existing_service
+
 # Hold the lock inside the daemon so it lasts until Node exits.
 (
   flock -n 9 || exit 75
@@ -25,7 +85,7 @@ command -v flock >/dev/null || { echo 'Install util-linux (flock)' >&2; exit 1; 
 ) 9>.service.lock >>logs/service.log 2>&1 &
 pid=$!
 
-# Already running or died before opening the log.
+# Rare race: another starter grabbed the lock between stop and our flock.
 sleep 0.3
 if ! kill -0 "$pid" 2>/dev/null; then
   set +e
@@ -33,7 +93,7 @@ if ! kill -0 "$pid" 2>/dev/null; then
   code=$?
   set -e
   if [[ "$code" -eq 75 ]]; then
-    echo 'This project already has a running service' >&2
+    echo 'Could not acquire the service lock after stopping the previous instance' >&2
     exit 75
   fi
   echo 'Service failed to start; see logs/service.log' >&2
