@@ -52,7 +52,7 @@ Node 任务记录不持久化；无法根据旧文件重建任务和下载接口
 
 ## 部署契约
 
-- Node.js 24.22.1（`.nvmrc`），Python 3.12，NVIDIA CUDA PyTorch 环境。
+- Node.js 24.22.1（`.nvmrc`），Python 3.12，NVIDIA CUDA PyTorch 环境。生产进程由 PM2 单实例 fork 守护并自动重启；不用 cluster。
 - 默认复用用户已验证的 torch 2.13/cu132 venv 与模型缓存；服务不默认升级这些依赖。
 - npm package-lock.json 固定 Node 依赖；Python 上游固定 0.47.1。实例导出 freeze 与私有镜像固定实际完整 GPU 环境。
 - 正常启动离线加载，模型准备作为管理员显式步骤。开机不执行 npm install/pip install。

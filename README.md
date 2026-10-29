@@ -33,25 +33,23 @@ GPU_DEVICES=0
 
 `.env` 内有安装脚本生成的 `API_KEY`，请将同一密钥配置到无界后端。不要放到浏览器代码。
 
-5. 启动服务：
+5. 启动服务（PM2 守护，单实例 fork，崩溃自动重启）：
 
 ```bash
+npm ci          # 若还没装过依赖 / 刚 pull 了含 pm2 的版本
+npm run build
 npm run start
 ```
 
-会先在前台流式打印启动日志，等到 `/health/ready` 成功（Worker 已就绪）后再回到提示符；进程继续在后台跑，日志追加到 `logs/service.log`。等待上限为 `WORKER_START_TIMEOUT_SECONDS`（默认 600）。开发前台热运行用 `npm run dev`（同样会按 `.nvmrc` 切换 Node）。
-
-模型未就绪时启动会失败并提示看日志。`MODEL_OFFLINE=true` 时缺少模型会明确失败，不会自动在线下载。
-
-停止：
+`npm run start` 会按 `.nvmrc` 切换 Node，用 PM2 拉起 `gpu-image-service`。HTTP 起来且至少一个 Worker 就绪后才算启动成功；进程由 PM2 守护，掉线会自动拉起。再次 `npm run start` 会先删掉旧实例再启动。
 
 ```bash
-kill "$(cat .service.pid)"
-# 或
-pkill -f 'node dist/main.js'
+npm run logs    # 看 PM2 日志
+npm run stop    # 停止并移除该应用
+npm run dev     # 前台开发（不走 PM2）
 ```
 
-重复 `npm run start` 会先停掉本目录里正在跑的实例，再重新启动。
+`MODEL_OFFLINE=true` 时缺少模型会启动失败并触发 PM2 重启退避；不会自动在线下载。
 
 6. 测试真实图片：
 
@@ -65,7 +63,7 @@ npm run smoke -- /root/raiw-test/input.png /root/gpu-image-service/output-servic
 npm run smoke -- 'https://your-storage.example/input.png' output-service.png
 ```
 
-`npm run start` 使用 flock 保证同一项目目录同时只有一个实例；再次 start 会先结束旧进程再拉起新进程，日志追加到 `logs/service.log`。一个 DATA_DIR 只供一个服务实例使用，不使用 PM2 cluster。
+进程由 PM2 单实例 fork 管理（`ecosystem.config.cjs`），`autorestart` 开启；不用 cluster。一个 DATA_DIR 只供一个服务实例使用。
 
 ## 对外访问
 

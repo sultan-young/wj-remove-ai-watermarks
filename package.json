@@ -3,10 +3,14 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "engines": { "node": ">=24 <25" },
+  "engines": {
+    "node": ">=24 <25"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "start": "bash scripts/start.sh",
+    "stop": "bash scripts/stop.sh",
+    "logs": "bash scripts/logs.sh",
     "dev": "bash scripts/dev.sh",
     "test": "node --import tsx --test --test-concurrency=1 test/*.test.ts",
     "check": "tsc --noEmit && python3 -m unittest discover -s python -p 'test_*.py' -v",
@@ -17,6 +21,7 @@
     "dotenv": "16.6.1",
     "fastify": "5.12.7",
     "ipaddr.js": "2.3.0",
+    "pm2": "6.0.14",
     "sharp": "0.35.5",
     "zod": "4.6.7"
   },

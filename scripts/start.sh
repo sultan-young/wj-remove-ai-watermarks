@@ -11,175 +11,72 @@ if [[ ! -f dist/main.js ]]; then
   echo 'Missing dist/main.js. Run npm ci && npm run build first.' >&2
   exit 1
 fi
+if [[ ! -x ./node_modules/.bin/pm2 ]]; then
+  echo 'pm2 is not installed. Run npm ci.' >&2
+  exit 1
+fi
 mkdir -p logs
-command -v flock >/dev/null || { echo 'Install util-linux (flock)' >&2; exit 1; }
 
-collect_service_pids() {
-  local -a found=()
-  local p holders cwd
-  if [[ -f .service.pid ]]; then
-    p=$(tr -d '[:space:]' < .service.pid || true)
-    if [[ "$p" =~ ^[0-9]+$ ]]; then
-      found+=("$p")
-    fi
-  fi
-  if command -v fuser >/dev/null 2>&1 && [[ -f .service.lock ]]; then
-    holders=$(fuser .service.lock 2>/dev/null || true)
-    for p in $holders; do
-      if [[ "$p" =~ ^[0-9]+$ ]]; then
-        found+=("$p")
-      fi
-    done
-  fi
-  # Bash $$ in a subshell is the parent PID; older starts wrote the wrong pid.
-  # Also find node processes whose cwd is this project.
-  if command -v pgrep >/dev/null 2>&1; then
-    while read -r p; do
-      [[ "$p" =~ ^[0-9]+$ ]] || continue
-      cwd=$(readlink "/proc/$p/cwd" 2>/dev/null || true)
-      if [[ "$cwd" == "$PWD" ]]; then
-        found+=("$p")
-      fi
-    done < <(pgrep -f 'node dist/main.js' || true)
-  fi
-  local -A seen=()
-  local -a unique=()
-  for p in "${found[@]}"; do
-    if [[ -z ${seen[$p]+x} ]]; then
-      seen[$p]=1
-      unique+=("$p")
-    fi
-  done
-  printf '%s\n' "${unique[@]}"
-}
+PM2=(./node_modules/.bin/pm2)
+export GPU_IMAGE_NODE
+GPU_IMAGE_NODE="$(command -v node)"
+APP_NAME=gpu-image-service
+# ecosystem.config.cjs reads this for wait_ready listen_timeout.
+timeout_s=$(grep -E '^WORKER_START_TIMEOUT_SECONDS=' .env 2>/dev/null | tail -n1 | cut -d= -f2- | tr -d '[:space:]' || true)
+export WORKER_START_TIMEOUT_SECONDS="${timeout_s:-600}"
 
-stop_existing_service() {
-  local -a unique=()
-  local p i any
-  mapfile -t unique < <(collect_service_pids)
-  if [[ ${#unique[@]} -eq 0 || -z "${unique[0]:-}" ]]; then
-    rm -f .service.pid
-    return 0
+echo "Using Node $GPU_IMAGE_NODE"
+"${PM2[@]}" delete "$APP_NAME" >/dev/null 2>&1 || true
+
+# Cleanup leftover processes from the pre-PM2 start.sh (flock / wrong .service.pid).
+if [[ -f .service.pid ]]; then
+  old=$(tr -d '[:space:]' < .service.pid || true)
+  if [[ "$old" =~ ^[0-9]+$ ]] && kill -0 "$old" 2>/dev/null; then
+    echo "Stopping legacy non-PM2 process (pid $old)…"
+    kill "$old" 2>/dev/null || true
+    sleep 1
+    kill -9 "$old" 2>/dev/null || true
   fi
-  for p in "${unique[@]}"; do
-    if kill -0 "$p" 2>/dev/null; then
-      echo "Stopping previous service (pid $p)…"
+  rm -f .service.pid
+fi
+if command -v pgrep >/dev/null 2>&1; then
+  while read -r p; do
+    [[ "$p" =~ ^[0-9]+$ ]] || continue
+    cwd=$(readlink "/proc/$p/cwd" 2>/dev/null || true)
+    if [[ "$cwd" == "$PWD" ]]; then
+      echo "Stopping leftover node process in this directory (pid $p)…"
       kill "$p" 2>/dev/null || true
-    fi
-  done
-  for i in $(seq 1 30); do
-    any=0
-    for p in "${unique[@]}"; do
-      if kill -0 "$p" 2>/dev/null; then
-        any=1
-        break
-      fi
-    done
-    [[ "$any" -eq 0 ]] && break
-    sleep 0.5
-  done
-  for p in "${unique[@]}"; do
-    if kill -0 "$p" 2>/dev/null; then
-      echo "Previous service pid $p did not exit; sending SIGKILL…"
+      sleep 0.5
       kill -9 "$p" 2>/dev/null || true
     fi
-  done
-  sleep 0.3
-  rm -f .service.pid
-  # Confirm the lock is free before we start.
-  if ! flock -n 9 true 9>.service.lock; then
-    echo 'Service lock is still held after stop; see fuser .service.lock' >&2
-    fuser -v .service.lock 2>&1 || true
-    return 1
-  fi
-}
+  done < <(pgrep -f 'node dist/main.js' || true)
+fi
+rm -f .service.lock
 
-stop_existing_service
-
-# Hold the lock inside the daemon so it lasts until Node exits.
-# Use BASHPID: $$ inside (... ) is still the parent shell PID.
-(
-  flock -n 9 || exit 75
-  printf '%s\n' "$BASHPID" > .service.pid
-  if command -v stdbuf >/dev/null; then
-    exec stdbuf -oL -eL node dist/main.js
-  fi
-  exec node dist/main.js
-) 9>.service.lock >>logs/service.log 2>&1 &
-pid=$!
-
-# Rare race: another starter grabbed the lock between stop and our flock.
-sleep 0.3
-if ! kill -0 "$pid" 2>/dev/null; then
-  set +e
-  wait "$pid"
-  code=$?
-  set -e
-  if [[ "$code" -eq 75 ]]; then
-    echo 'Could not acquire the service lock after stopping the previous instance' >&2
-    exit 75
-  fi
-  echo 'Service failed to start; see logs/service.log' >&2
+echo "Starting $APP_NAME with PM2 (wait_ready, timeout ${WORKER_START_TIMEOUT_SECONDS}s)…"
+if ! "${PM2[@]}" start ecosystem.config.cjs --update-env; then
+  echo 'PM2 failed to start the app; see: npm run logs' >&2
   exit 1
 fi
 
-echo "Starting (pid $pid). Streaming logs until ready…"
-# Show only new lines while we wait; keep writing to the same log file.
-tail -n 0 -F logs/service.log --pid="$pid" 2>/dev/null &
-tail_pid=$!
-cleanup_tail() { kill "$tail_pid" 2>/dev/null || true; wait "$tail_pid" 2>/dev/null || true; }
-trap cleanup_tail EXIT
-
-set +e
-node --input-type=module - "$pid" <<'JS'
-import 'dotenv/config';
-import { kill } from 'node:process';
-
-const pid = Number(process.argv[2]);
-const port = process.env.PORT || '8000';
-const key = process.env.API_KEY;
-const timeoutMs = Math.max(1, Number(process.env.WORKER_START_TIMEOUT_SECONDS || 600)) * 1000;
-const deadline = Date.now() + timeoutMs;
-if (!key) {
-  console.error('API_KEY missing from .env');
+status="$("${PM2[@]}" jlist)"
+if ! printf '%s' "$status" | node --input-type=module -e '
+const chunks = [];
+for await (const chunk of process.stdin) chunks.push(chunk);
+const apps = JSON.parse(Buffer.concat(chunks).toString("utf8") || "[]");
+const app = apps.find((item) => item.name === "gpu-image-service");
+if (!app || app.pm2_env?.status !== "online") {
+  console.error(`PM2 app is not online (status=${app?.pm2_env?.status ?? "missing"})`);
   process.exit(1);
 }
-
-function alive() {
-  try { kill(pid, 0); return true; } catch { return false; }
-}
-
-while (Date.now() < deadline) {
-  if (!alive()) process.exit(2);
-  try {
-    const response = await fetch(`http://127.0.0.1:${port}/health/ready`, {
-      headers: { Authorization: `Bearer ${key}` },
-    });
-    if (response.ok) process.exit(0);
-  } catch {
-    // HTTP not listening yet
-  }
-  await new Promise(resolve => setTimeout(resolve, 1000));
-}
-process.exit(3);
-JS
-wait_code=$?
-set -e
-cleanup_tail
-trap - EXIT
-
-if [[ "$wait_code" -eq 0 ]]; then
-  echo "Started successfully in background (pid $pid). Logs: logs/service.log"
-  exit 0
-fi
-if [[ "$wait_code" -eq 2 ]]; then
-  echo 'Service exited before becoming ready; see logs/service.log' >&2
+'; then
+  echo 'Startup did not reach online; see: npm run logs' >&2
+  "${PM2[@]}" logs "$APP_NAME" --lines 50 --nostream || true
   exit 1
 fi
-if [[ "$wait_code" -eq 3 ]]; then
-  echo "Timed out waiting for /health/ready; stopping pid $pid. See logs/service.log" >&2
-  kill "$pid" 2>/dev/null || true
-  exit 1
-fi
-echo 'Service failed to become ready; see logs/service.log' >&2
-exit 1
+
+"${PM2[@]}" save >/dev/null 2>&1 || true
+echo
+"${PM2[@]}" status "$APP_NAME"
+echo
+echo "Started. Logs: npm run logs   Stop: npm run stop   Restart: npm run start"
