@@ -227,13 +227,14 @@ class RealAdapter:
         return {"mode": "metadata", "metadata": metadata, "verification": "not_performed"}
 
     def _vendor_for_engine(self, source, processing):
-        """与上游 invisible 命令相同：auto 先变成 None；显式 vendor 或 force 才跳过无信号检查。传给引擎的是解析后的 cohort。"""
+        """force=false 时始终先查本地隐式信号；未找到则 NO_SIGNAL，不跑扩散。
+        显式 vendor 只决定强度 cohort，不再等同于强制处理。force=true 才跳过信号检查。"""
         requested = processing.get("vendor") or "auto"
         resolved = None if requested == "auto" else requested
-        if not processing.get("force") and resolved is None:
+        if not processing.get("force"):
             from remove_ai_watermarks.identify import has_invisible_target
             if not has_invisible_target(source):
-                raise AdapterError("NO_SIGNAL", "No supported local signal; explicit vendor or force is required")
+                raise AdapterError("NO_SIGNAL", "No supported local signal; force is required to continue")
         from remove_ai_watermarks._internal.watermark_profiles import vendor_for_strength
         detected = vendor_for_strength(source) if resolved is None else None
         return resolved or detected

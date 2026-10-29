@@ -47,7 +47,7 @@ URL 必须直接返回图片字节，不是分享页面。支持签名查询参�
 | tile_size | 1024 | `--tile-size` |
 | tile_overlap | 128 | `--tile-overlap` |
 | cpu_offload | false | `--cpu-offload` |
-| force | false | `--force`。false 且 vendor 为 auto、又没有本地信号时，invisible 返回 NO_SIGNAL。all 仍返回可见处理结果，`invisible` 为 `no-signal` |
+| force | false | `--force`。false 且没有本地隐式信号时，invisible 返回 NO_SIGNAL（显式 vendor 只决定强度 cohort，不再跳过检测）。all 仍返回可见处理结果，`invisible` 为 `no-signal` |
 | mark | auto | `visible --mark`。auto 或注册表中的标记。all 只用 auto |
 | sensitivity | auto | `--sensitivity`。auto / strict |
 | detect | true | `--detect` / `--no-detect`。false 且 mark 为 auto 时与上游一样回落到 gemini |

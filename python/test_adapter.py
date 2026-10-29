@@ -75,8 +75,15 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(error.exception.code, "NO_SIGNAL")
         self.assertFalse(self.output.exists())
 
-    def test_explicit_vendor_overrides_gate(self):
+    def test_explicit_vendor_still_gates_without_force(self):
         self.options.update(force=False, vendor="google", adaptive_polish=False)
+        with self.assertRaises(AdapterError) as error:
+            self.run_with_stubs(lambda adapter: adapter.process(self.job()))
+        self.assertEqual(error.exception.code, "NO_SIGNAL")
+        self.assertFalse(self.output.exists())
+
+    def test_force_with_explicit_vendor_skips_gate(self):
+        self.options.update(force=True, vendor="google", adaptive_polish=False)
         self.run_with_stubs(lambda adapter: adapter.process(self.job()))
         run = next(x[1] for x in self.calls if x[0] == "run")
         self.assertEqual(run["vendor"], "google")

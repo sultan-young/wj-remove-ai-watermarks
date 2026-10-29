@@ -100,7 +100,7 @@ Worker 按 GPU_DEVICES 轮询分配；并发为 2、只写 `GPU_DEVICES=0` 就�
 - POST `/v1/jobs` 使用 multipart 的 `file + options`，或 JSON 的 `url + options`，二选一。
 - 立即进入异步计算队列；URL 提交会先完成受限下载和图片验证，再返回任务 ID，因此提交请求本身最长可能需要 URL_TIMEOUT_MS。
 - 处理参数的名字、默认值和取值与上游 0.47.1 一致，服务不改写后再交给引擎。`force` 默认 false。没写 `pipeline` 时是 `qwen-zimage`。`strength`、`seed`、`adaptive_polish` 省略时分别是 null、null、null，由上游自己决定。
-- `invisible` 在 `force=false`、vendor 为 auto、无本地信号时以 `NO_SIGNAL` 失败，不生成扩散结果。`all` 仍会先去掉可见水印；没有隐形信号时任务成功，`effective.invisible` 为 `no-signal`。
+- `invisible` 在 `force=false`、无本地信号时以 `NO_SIGNAL` 失败，不生成扩散结果（显式 vendor 只决定强度，不跳过检测）。`all` 仍会先去掉可见水印；没有隐形信号时任务成功，`effective.invisible` 为 `no-signal`。
 - `mode=visible` 使用上游的 `mark`、`sensitivity`、`detect`、`backend`。没有去掉标记时返回 `NO_VISIBLE_MARK`，不交付原图。`detect=false` 且 `mark=auto` 时与上游命令一样回落到 gemini。
 - 支持 PNG/JPEG/WebP 单帧图片；保留上传字节，不在上传阶段重新编码。输出 PNG，恢复按 EXIF 正向显示的输入尺寸。
 - pipeline、controlnet_conditioning_scale、cpu_offload 改变时，重启对应 Worker 再加载模型；同配置任务复用引擎。

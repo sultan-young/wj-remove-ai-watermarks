@@ -40,7 +40,7 @@ Zod 定义参数及默认值，并导出 JSON Schema 供无界生成表单。Pyt
 
 处理参数使用上游的名字和默认值。服务不收紧取值、不把省略的 pipeline 改成另一套，也不改写 text_manifest。队列、字节和像素上限是这台机器的资源限制，不是去水印参数。hf_token 仅来自部署环境。
 
-vendor 为 auto 时，传给引擎的 cohort 与上游 invisible 命令一样，从原文件解析。显式 vendor 覆盖并跳过无信号检查。requested 保存调用方提交的值；effective 里的 strength 是上游解析后的执行值，提交的 null 不会先被改掉。
+vendor 为 auto 时，传给引擎的 cohort 与上游 invisible 命令一样，从原文件解析。显式 vendor 只覆盖强度 cohort；`force=false` 时仍会做本地隐式信号检查，未找到则 NO_SIGNAL。requested 保存调用方提交的值；effective 里的 strength 是上游解析后的执行值，提交的 null 不会先被改掉。
 
 上游内部 pipeline=auto 由原项目路由；它可能触发不同模型的加载，不承诺 consumer GPU 上混用多种模型具有固定耗时或相同显存占用。ENABLED_PIPELINES 只决定这台机器能不能加载某个上游 profile。
 
