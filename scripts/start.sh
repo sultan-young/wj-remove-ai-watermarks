@@ -23,6 +23,8 @@ GPU_IMAGE_NODE="$(command -v node)"
 APP_NAME=gpu-image-service
 timeout_s=$(grep -E '^WORKER_START_TIMEOUT_SECONDS=' .env 2>/dev/null | tail -n1 | cut -d= -f2- | tr -d '[:space:]' || true)
 export WORKER_START_TIMEOUT_SECONDS="${timeout_s:-600}"
+port=$(grep -E '^PORT=' .env 2>/dev/null | tail -n1 | cut -d= -f2- | tr -d '[:space:]' || true)
+port="${port:-8000}"
 
 echo "Using Node $GPU_IMAGE_NODE"
 "${PM2[@]}" delete "$APP_NAME" >/dev/null 2>&1 || true
@@ -52,20 +54,29 @@ if command -v pgrep >/dev/null 2>&1; then
 fi
 rm -f .service.lock
 
+# Free the listen port if a stale process still holds it.
+if command -v fuser >/dev/null 2>&1; then
+  if fuser -s "${port}/tcp" 2>/dev/null; then
+    echo "Port $port is busy; stopping its process…"
+    fuser -k "${port}/tcp" 2>/dev/null || true
+    sleep 1
+  fi
+fi
+
 echo "Starting $APP_NAME with PM2…"
 if ! "${PM2[@]}" start ecosystem.config.cjs --update-env; then
   echo 'PM2 failed to start the app; see: npm run logs' >&2
   exit 1
 fi
 
-echo "HTTP process started. Streaming logs until /health/ready (timeout ${WORKER_START_TIMEOUT_SECONDS}s)…"
-"${PM2[@]}" logs "$APP_NAME" --raw --lines 0 &
+echo "Streaming logs until /health/ready (timeout ${WORKER_START_TIMEOUT_SECONDS}s)…"
+"${PM2[@]}" logs "$APP_NAME" --raw --lines 100 &
 logs_pid=$!
 cleanup_logs() { kill "$logs_pid" 2>/dev/null || true; wait "$logs_pid" 2>/dev/null || true; }
 trap cleanup_logs EXIT
 
 set +e
-node --input-type=module <<'JS'
+PORT="$port" node --input-type=module <<'JS'
 import 'dotenv/config';
 
 const port = process.env.PORT || '8000';
@@ -79,10 +90,15 @@ if (!key) {
 
 while (Date.now() < deadline) {
   try {
-    const response = await fetch(`http://127.0.0.1:${port}/health/ready`, {
+    const live = await fetch(`http://127.0.0.1:${port}/health/live`);
+    if (!live.ok) {
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      continue;
+    }
+    const ready = await fetch(`http://127.0.0.1:${port}/health/ready`, {
       headers: { Authorization: `Bearer ${key}` },
     });
-    if (response.ok) process.exit(0);
+    if (ready.ok) process.exit(0);
   } catch {
     // not listening / not ready yet
   }
@@ -96,9 +112,9 @@ cleanup_logs
 trap - EXIT
 
 if [[ "$wait_code" -ne 0 ]]; then
-  echo "Workers did not become ready in time; see: npm run logs" >&2
+  echo "Workers did not become ready in time; recent PM2 status/logs:" >&2
+  "${PM2[@]}" status "$APP_NAME" || true
   "${PM2[@]}" logs "$APP_NAME" --lines 80 --nostream || true
-  "${PM2[@]}" delete "$APP_NAME" >/dev/null 2>&1 || true
   exit 1
 fi
 

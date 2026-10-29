@@ -12,8 +12,6 @@ for (const signal of ['SIGINT', 'SIGTERM'] as const) process.on(signal, async ()
 });
 await app.listen({ host: config.host, port: config.port });
 app.log.info({ concurrency: config.concurrency, devices: config.devices, mode: config.workerMode }, 'GPU image service started');
-// Unblock PM2 wait_ready as soon as HTTP is listening. Worker readiness is checked by start.sh.
-if (typeof process.send === 'function') process.send('ready');
 
 const deadline = Date.now() + config.startupTimeoutMs;
 while (Date.now() < deadline) {
