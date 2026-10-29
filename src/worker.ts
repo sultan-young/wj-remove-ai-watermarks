@@ -8,6 +8,11 @@ export type WorkerEvent = { protocol: number; type: string; job_id?: string; [ke
 export class WorkerFailure extends Error {
   constructor(public code: string, message: string) { super(message); }
 }
+// The Python loop stays up after a task error. Recycle only when the process is stuck or no longer usable.
+const recycleWorker = new Set([
+  'TASK_TIMEOUT', 'WORKER_EXITED', 'WORKER_PROTOCOL_ERROR', 'WORKER_WRITE_FAILED',
+  'WORKER_INIT_FAILED', 'WORKER_INIT_TIMEOUT', 'WORKER_START_FAILED', 'CUDA_OOM',
+]);
 export class WorkerClient {
   ready = false;
   info: Record<string, unknown> = {};
@@ -101,7 +106,10 @@ export class WorkerClient {
           timer = setTimeout(() => reject(new WorkerFailure('TASK_TIMEOUT', 'Task timed out')), this.config.taskTimeoutMs);
         }),
       ]);
-    } catch (error) { await this.stop(); throw error; }
+    } catch (error) {
+      if (!(error instanceof WorkerFailure) || recycleWorker.has(error.code)) await this.stop();
+      throw error;
+    }
     finally { clearTimeout(timer); this.pending = undefined; }
   }
 

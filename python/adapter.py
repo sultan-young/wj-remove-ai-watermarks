@@ -172,7 +172,7 @@ class RealAdapter:
             raise AdapterError("UPSTREAM_UNAVAILABLE", "Visible removal is not available in this install")
         sensitivity = str(processing.get("visible_mark") or "auto").strip().lower()
         if sensitivity not in ("auto", "strict"):
-            sensitivity = "auto"
+            raise AdapterError("INVALID_OPTIONS", "visible_mark must be auto or strict")
         kwargs = {"strip_metadata": True, "write_noop": True, "sensitivity": sensitivity}
         backend = processing.get("visible_backend") or "auto"
         if backend != "auto":
@@ -230,10 +230,19 @@ class RealAdapter:
         return prepared
 
     def _all(self, source, output, processing, manifest):
-        prepared = self._processing_for_diffusion(source, processing)
+        """可见水印不依赖隐形信号。没有本地信号时仍返回可见处理结果，并标明隐形重建未执行。"""
         visible_path = output.with_name(output.name + ".visible.png")
         try:
             visible = self._visible(source, visible_path, processing)
+            try:
+                # 来源和有无信号按原图判断，不用已经清过可见水印的中间图。
+                prepared = self._processing_for_diffusion(source, processing)
+            except AdapterError as error:
+                if error.code != "NO_SIGNAL":
+                    raise
+                shutil.copyfile(visible_path, output)
+                self._strip_written_metadata(output)
+                return {**visible, "mode": "all", "invisible": "not_run", "reason": "NO_SIGNAL", "verification": "not_performed"}
             invisible = self._invisible(visible_path, output, prepared, manifest)
         finally:
             visible_path.unlink(missing_ok=True)

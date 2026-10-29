@@ -47,7 +47,8 @@ URL 必须直接返回图片字节，不是分享页面。支持签名查询参�
 | tile_size | 1024 | 256–4096，8 的倍数 |
 | tile_overlap | 128 | 0–2048，8 的倍数，小于 tile_size |
 | cpu_offload | false | 按上游支持降低显存，通常更慢 |
-| force | true | 已知需要处理时强制执行；false 且无本地信号可能 NO_SIGNAL |
+| force | true | 已知需要处理时强制执行。invisible 在 false 且无本地信号时 NO_SIGNAL；all 仍返回可见处理结果，并标明隐形重建未执行 |
+| visible_mark | auto | auto / strict。其他值直接拒绝 |
 | fidelity_anchor | false | 实验性，仅 qwen-zimage 且需要 text_manifest，默认关闭 |
 
 `text_manifest` 是顶层 JSON 对象（JSON 提交），或 multipart 普通文本字段中的 JSON。不是服务器任意路径。需要 ENABLE_TEXT_RESTORATION=true，以及：
@@ -143,6 +144,6 @@ Content-Type: application/json
 | 503 DRAINING | 暂停接单 |
 | 任务 CUDA_OOM | 显存不足，降低并发或图片大小，必要时启用 offload/tile 后重新验证效果 |
 | 任务 WORKER_EXITED / TASK_TIMEOUT | Worker 中断或任务超时 |
-| 任务 NO_SIGNAL | force=false 且本地无目标信号；不代表无水印 |
+| 任务 NO_SIGNAL | invisible 模式下 force=false 且本地无目标信号；不代表无水印。all 模式改为成功并跳过隐形重建 |
 
 多张图片每张提交一个任务。无界可以并行提交，但实际计算并发只由服务 WORKER_CONCURRENCY 控制。

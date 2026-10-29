@@ -15,7 +15,7 @@ const auth = { authorization: `Bearer ${key}` };
 const png = await sharp({ create: { width: 32, height: 24, channels: 3, background: '#123abc' } }).png().toBuffer();
 async function setup(overrides: Partial<Config> = {}) {
   const dir = await mkdtemp(path.join(tmpdir(), 'raiw-test-'));
-  const config = { ...loadConfig({ API_KEY: key, WORKER_MODE: 'mock', LOG_LEVEL: 'silent', DATA_DIR: dir }),
+  const config = { ...loadConfig({ API_KEY: key, WORKER_MODE: 'mock', LOG_LEVEL: 'silent', DATA_DIR: dir, PYTHON_BIN: process.env.PYTHON_BIN }),
     workerPath: path.resolve('test/fixture_worker.py'), restartDelayMs: 10, ...overrides };
   const built = await buildApp(config);
   await built.app.ready();
@@ -101,6 +101,23 @@ test('worker crash fails current task and recovers queued task; running cancella
     await s.app.inject({ method: 'POST', url: `/v1/jobs/${running.id}/cancel`, headers: auth });
     assert.equal((await final(s.app, running.id)).status, 'cancelled');
     const last = (await upload(s.app)).json(); assert.equal((await final(s.app, last.id)).status, 'succeeded');
+  } finally { await s.close(); }
+});
+
+test('business failure keeps the worker; timeout recycles it', async () => {
+  const s = await setup({ taskTimeoutMs: 500 });
+  try {
+    await until(() => s.manager.slots[0]!.client.ready, Boolean);
+    const pid = s.manager.slots[0]!.client.child!.pid;
+    const failed = (await upload(s.app, { processing: { seed: 96 } })).json();
+    const failure = await final(s.app, failed.id);
+    assert.equal(failure.status, 'failed');
+    assert.equal(failure.error.code, 'PROCESSING_FAILED');
+    assert.equal(s.manager.slots[0]!.client.ready, true);
+    assert.equal(s.manager.slots[0]!.client.child!.pid, pid);
+    const timedOut = (await upload(s.app, { processing: { seed: 98 } })).json();
+    assert.equal((await final(s.app, timedOut.id)).error.code, 'TASK_TIMEOUT');
+    await until(() => s.manager.slots[0]!.client.ready && s.manager.slots[0]!.client.child?.pid !== pid, Boolean);
   } finally { await s.close(); }
 });
 
@@ -198,6 +215,8 @@ test('upload limits, pixel limits, manifests and invalid options reject before p
   finally { await t.close(); }
   const config = loadConfig({ API_KEY: key });
   assert.throws(() => parseOptions({ processing: { tile_overlap: 1024 } }, config));
+  assert.throws(() => parseOptions({ processing: { visible_mark: 'loose' } }, config));
+  assert.equal(parseOptions({ processing: { visible_mark: 'strict' } }, config).processing.visible_mark, 'strict');
   assert.throws(() => parseOptions({ processing: { pipeline: 'qwen-zimage' } }, config));
   assert.throws(() => loadConfig({ API_KEY: key, WORKER_CONCURRENCY: '0' }));
   assert.equal(loadConfig({ API_KEY: key, WORKER_CONCURRENCY: '2' }).concurrency, 2);

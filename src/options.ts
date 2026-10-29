@@ -5,7 +5,7 @@ export const visibleBackends = ['auto', 'cv2', 'migan', 'lama'] as const;
 export const processingSchema = z.object({
   mode: z.enum(removalModes).default('invisible'),
   pipeline: z.enum(profiles).optional(),
-  visible_mark: z.string().trim().min(1).max(64).default('auto'),
+  visible_mark: z.enum(['auto', 'strict']).default('auto'),
   visible_backend: z.enum(visibleBackends).default('auto'),
   vendor: z.enum(['auto', 'openai', 'google', 'microsoft', 'meta']).default('auto'),
   strength: z.number().min(0).max(1).nullable().default(null),

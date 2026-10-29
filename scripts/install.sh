@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
-node -e 'if (Number(process.versions.node.split(".")[0]) !== 24) throw Error("Install Node.js 24 LTS first")'
+# shellcheck disable=SC1091
+source "$(dirname "${BASH_SOURCE[0]}")/use-node.sh"
 npm ci
 npm run build
 if [[ ! -f .env ]]; then

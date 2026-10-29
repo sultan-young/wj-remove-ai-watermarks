@@ -12,7 +12,7 @@ import { GpuClient } from '../examples/client.mjs';
 test('shipped JS client works over real HTTP: submit file + URL, download, hash check and ack', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'raiw-client-'));
   const key = 'client-test-key-longer-than-twenty-four';
-  const config = loadConfig({ API_KEY: key, WORKER_MODE: 'mock', LOG_LEVEL: 'silent', DATA_DIR: root });
+  const config = loadConfig({ API_KEY: key, WORKER_MODE: 'mock', LOG_LEVEL: 'silent', DATA_DIR: root, PYTHON_BIN: process.env.PYTHON_BIN });
   const { app } = await buildApp(config);
   try {
     const address = await app.listen({ port: 0, host: '127.0.0.1' });

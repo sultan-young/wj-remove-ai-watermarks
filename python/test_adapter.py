@@ -122,6 +122,43 @@ class AdapterTests(unittest.TestCase):
         self.assertFalse(any(item[0] == "run" for item in self.calls))
         self.assertFalse(any(item[0] == "init" for item in self.calls))
 
+    def test_unknown_visible_mark_is_rejected(self):
+        self.options.update(mode="visible", visible_mark="loose")
+
+        def visible(*_args, **_kwargs):
+            raise AssertionError("visible removal should not run")
+
+        self.modules["remove_ai_watermarks"].remove_visible_detailed = visible
+        with self.assertRaises(AdapterError) as error:
+            self.run_with_stubs(lambda adapter: adapter.process(self.job()))
+        self.assertEqual(error.exception.code, "INVALID_OPTIONS")
+
+    def test_all_mode_without_signal_still_removes_visible_marks(self):
+        self.options.update(mode="all", force=False)
+
+        def visible(source, output, **kwargs):
+            self.calls.append(("visible", kwargs))
+            Image.open(source).save(output, format="PNG")
+            return types.SimpleNamespace(status="cleaned", marks=[])
+
+        self.modules["remove_ai_watermarks"].remove_visible_detailed = visible
+
+        def execute(adapter):
+            result = adapter.process(self.job())
+            self.assertEqual(result["mode"], "all")
+            self.assertEqual(result["visible_status"], "cleaned")
+            self.assertEqual(result["invisible"], "not_run")
+            self.assertEqual(result["reason"], "NO_SIGNAL")
+            self.assertTrue(self.output.exists())
+        self.run_with_stubs(execute)
+        self.assertTrue(any(item[0] == "visible" for item in self.calls))
+        self.assertFalse(any(item[0] in ("run", "init") for item in self.calls))
+
+    def test_container_pid_1_is_a_valid_supervisor(self):
+        from worker import reparented
+        self.assertFalse(reparented(1, 1))
+        self.assertTrue(reparented(4321, 1))
+
     def test_all_mode_runs_visible_then_diffusion(self):
         self.options["mode"] = "all"
 

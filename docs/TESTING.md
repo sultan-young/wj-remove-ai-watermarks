@@ -34,14 +34,13 @@ Python adapter 测试通过模型模块替身验证：引擎只初始化一次�
 
 ## 未执行，必须在目标 GPU 验证
 
-本开发环境没有 nvidia-smi 和 Docker 可执行程序，未运行真实 CUDA 扩散，也未构建 Docker 镜像。mock 只复制图片，不改变水印。
+本开发环境没有 nvidia-smi，未运行真实 CUDA 扩散。mock 只复制图片，不改变水印。
 
 因此没有声称以下内容已经验证：
 
 - 真实 SDXL/Qwen/Chroma 推理效果和每张耗时。
 - 目标 GPU 上并发 2 或更高的显存容量。
 - 人脸路径、实验文字修复的真实模型处理。
-- Docker recipe 的依赖完整兼容性、镜像构建及 CUDA 运行。
 - 原生 2K 的性能或文字无损保留。
 - SynthID 或其他厂商验证器返回阴性。
 

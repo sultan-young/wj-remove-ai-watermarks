@@ -6,7 +6,7 @@
   "engines": { "node": ">=24 <25" },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "start": "node dist/main.js",
+    "start": "bash scripts/start.sh",
     "dev": "tsx src/main.ts",
     "test": "node --import tsx --test --test-concurrency=1 test/*.test.ts",
     "check": "tsc --noEmit && python3 -m unittest discover -s python -p 'test_*.py' -v",

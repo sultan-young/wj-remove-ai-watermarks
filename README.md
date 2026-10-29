@@ -9,7 +9,7 @@ TypeScript + Fastify API，常驻 Python Worker 调用 `remove-ai-watermarks==0.
 你已有可用环境 `/root/raiw-test/.venv` 和模型缓存 `/root/raiw-test/model-cache`。请保留它们。
 
 1. 将整个项目解压到 `/root/gpu-image-service`。
-2. 准备 Node.js **24 LTS**（`node --version`）。项目不自动替换系统 Node。
+2. 运行环境需要 nvm。`.nvmrc` 锁定 Node.js **24.22.1**。`npm run start` 会加载 nvm：已安装就切换，没有就先 `nvm install`，然后再启动。
 3. 执行：
 
 ```bash
@@ -37,7 +37,7 @@ GPU_DEVICES=0
 5. 第一次前台启动观察日志：
 
 ```bash
-bash scripts/start.sh
+npm run start
 ```
 
 另开终端检查，下面命令仅打印就绪状态，不输出密钥：
@@ -64,10 +64,10 @@ npm run smoke -- 'https://your-storage.example/input.png' output-service.png
 测试完毕按 Ctrl+C 停止前台服务，再后台启动：
 
 ```bash
-nohup bash scripts/start.sh >> logs/service.log 2>&1 </dev/null &
+nohup npm run start >> logs/service.log 2>&1 </dev/null &
 ```
 
-`scripts/start.sh` 使用 flock 防止同一个项目目录重复启动；重复启动退出 75，不会截断原日志。一个 DATA_DIR 只供一个服务实例使用，不使用 PM2 cluster。
+`npm run start` 使用 flock 防止同一个项目目录重复启动；重复启动退出 75，不会截断原日志。一个 DATA_DIR 只供一个服务实例使用，不使用 PM2 cluster。
 
 ## 对外访问
 
@@ -97,7 +97,7 @@ Worker 按 GPU_DEVICES 轮询分配；并发为 2、只写 `GPU_DEVICES=0` 就�
 
 - POST `/v1/jobs` 使用 multipart 的 `file + options`，或 JSON 的 `url + options`，二选一。
 - 立即进入异步计算队列；URL 提交会先完成受限下载和图片验证，再返回任务 ID，因此提交请求本身最长可能需要 URL_TIMEOUT_MS。
-- 默认 `force=true`，明确执行重建。`force=false` 且无显式 vendor、无本地信号时，任务以 `NO_SIGNAL` 失败，不生成“已清理”的假结果。
+- 默认 `force=true`，明确执行重建。`invisible` 在 `force=false`、无显式 vendor、无本地信号时以 `NO_SIGNAL` 失败，不生成扩散假结果。`all` 仍会先去掉可见水印；隐形重建被拒绝时任务成功，`effective.invisible` 为 `not_run`。
 - 支持 PNG/JPEG/WebP 单帧图片；保留上传字节，不在上传阶段重新编码。输出 PNG，恢复按 EXIF 正向显示的输入尺寸。
 - pipeline、controlnet_scale、cpu_offload 改变时，重启对应 Worker 再加载模型；同配置任务复用引擎。
 - `auto` 使用上游来源路由；可能需要多个模型缓存，建议先逐个准备并验证具体 pipeline，再启用 auto。
@@ -134,18 +134,6 @@ bash scripts/export-environment.sh
 - 兼容的 NVIDIA/CUDA GPU 可复用环境；不承诺任意 GPU/驱动/架构无条件兼容。
 
 镜像启动仍需模型加载时间，不代表瞬间就绪。切换 GPU 不会自动改变强度和画质策略。
-
-## 其他平台的 Docker 入口
-
-提供 Dockerfile 和 compose.yaml，适合已具备 NVIDIA 驱动、Container Toolkit、Docker Compose GPU 支持的主机。**本交付环境无 Docker 和 GPU，Docker 构建及 CUDA 推理未实测。** 默认 Docker recipe 使用 CUDA 12.8、Torch 2.7.1；它不是你现有 Torch 2.13/cu132 环境的逐字复制。优先使用已验证实例的私有镜像；如使用 Docker，请单独做实际 GPU 验证并保存构建镜像 digest。
-
-```bash
-docker compose build
-# .env 中 MODEL_CACHE_HOST_PATH 指向完整模型缓存，或放入 ./model-cache。
-docker compose up -d
-```
-
-不需要在优云智算现有容器内再安装 Docker。
 
 ## 内存状态、保留时间与关机
 

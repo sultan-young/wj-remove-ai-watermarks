@@ -31,7 +31,7 @@ Linux Worker 设置父进程退出信号，减少 Node 异常退出后的孤立�
 - QUEUE_TIMEOUT_SECONDS 防止 Worker 一直不就绪时无限排队；记录 QUEUE_TIMEOUT，不自动重算。
 - 服务关闭或 drain 期间不接受新任务；drain 保留并执行已有队列，属于可逆的维护模式。
 - safe_to_stop 仅反映本服务状态，不等于云平台已关机。
-- 运行中取消会结束对应 Worker，因此需要重新加载模型。不会恢复推理中间状态。
+- 运行中取消、任务超时、协议损坏或 CUDA_OOM 会结束对应 Worker，因此需要重新加载模型。Python 已返回的业务失败不会结束 Worker。不会恢复推理中间状态。
 - 队列和幂等映射只在当前会话有效，TTL/手动删除后对应幂等保护结束。跨重启的业务去重由无界后端决定。
 
 ## 参数约束
@@ -52,7 +52,7 @@ Node 任务记录不持久化；无法根据旧文件重建任务和下载接口
 
 ## 部署契约
 
-- Node.js 24，Python 3.12，NVIDIA CUDA PyTorch 环境。
+- Node.js 24.22.1（`.nvmrc`），Python 3.12，NVIDIA CUDA PyTorch 环境。
 - 默认复用用户已验证的 torch 2.13/cu132 venv 与模型缓存；服务不默认升级这些依赖。
 - npm package-lock.json 固定 Node 依赖；Python 上游固定 0.47.1。实例导出 freeze 与私有镜像固定实际完整 GPU 环境。
 - 正常启动离线加载，模型准备作为管理员显式步骤。开机不执行 npm install/pip install。

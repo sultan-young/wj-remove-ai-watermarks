@@ -10,12 +10,17 @@ import warnings
 from adapter import RealAdapter, MockAdapter, AdapterError
 
 
+def reparented(spawn_parent, current_parent):
+    """父进程号变了才说明监督进程已经退出。容器里 Node 自己是 1 号进程时，这是正常状态。"""
+    return current_parent != spawn_parent
+
+
 def main():
-    # Linux deployment: prevent orphan GPU workers if the Node supervisor is killed.
+    # Linux deployment: ask the kernel to signal this worker if Node dies.
     if sys.platform == "linux":
         parent = os.getppid()
         ctypes.CDLL(None).prctl(1, 15)
-        if parent == 1 or os.getppid() != parent:
+        if reparented(parent, os.getppid()):
             return
     channel = os.fdopen(3, "w", buffering=1)
     lock = threading.Lock()
