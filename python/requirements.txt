@@ -1,0 +1,2 @@
+# Torch/CUDA comes from the chosen GPU base environment. Reuse the known-working instance.
+remove-ai-watermarks[qwen-zimage]==0.47.1
