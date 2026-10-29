@@ -4,7 +4,7 @@ import path from 'node:path';
 import type { Config } from './config.js';
 import { engineConfig, type Options } from './options.js';
 import { ServiceError } from './errors.js';
-import { WorkerClient, WorkerFailure } from './worker.js';
+import { WorkerClient, WorkerFailure, type WorkerEvent } from './worker.js';
 import { validateImage } from './images.js';
 import {
   beginStage, finishOpenStage, progressFromStages, publicStages, sealStage, type StageClock, type StageDetail,
@@ -138,11 +138,13 @@ export class Manager {
       void this.execute(slot, job).finally(() => { slot.busy = false; (slot as Slot & { jobId?: string }).jobId = undefined; this.pump(); });
     }
   }
-  private applyWorkerStage(job: Job, event: { stage?: unknown; detail?: unknown }) {
-    if (typeof event.stage !== 'string' || !event.stage.trim()) return;
-    const detail = event.detail && typeof event.detail === 'object' && !Array.isArray(event.detail)
-      ? event.detail as StageDetail : undefined;
-    beginStage(job, event.stage, detail);
+  private applyWorkerStage(job: Job, event: WorkerEvent) {
+    const stage = event.stage;
+    if (typeof stage !== 'string' || !stage.trim()) return;
+    const raw = event.detail;
+    const detail = raw && typeof raw === 'object' && !Array.isArray(raw)
+      ? raw as StageDetail : undefined;
+    beginStage(job, stage, detail);
   }
   private async execute(slot: Slot, job: Job) {
     try {
