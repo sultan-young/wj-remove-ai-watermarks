@@ -48,7 +48,10 @@ export class WorkerClient {
       this.pending?.reject(error);
     };
     child.on('error', e => fail(new WorkerFailure('WORKER_START_FAILED', e.message)));
-    child.on('exit', (code, signal) => fail(new WorkerFailure('WORKER_EXITED', `Worker exited (${code ?? signal})`)));
+    child.on('exit', (code, signal) => {
+      this.log(`process exit code=${code ?? ''} signal=${signal ?? ''} pid=${child.pid ?? ''} gpu=${gpu}`);
+      fail(new WorkerFailure('WORKER_EXITED', `Worker exited (${code ?? signal})`));
+    });
     for (const stream of [child.stdout, child.stderr]) stream?.on('data', data => this.log(String(data).slice(0, 8192)));
     const channel = child.stdio[3] as Readable;
     let lineBytes = 0;
@@ -106,7 +109,11 @@ export class WorkerClient {
         }),
       ]);
     } catch (error) {
-      if (!(error instanceof WorkerFailure) || recycleWorker.has(error.code)) await this.stop();
+      const code = error instanceof WorkerFailure ? error.code : 'WORKER_INIT_FAILED';
+      if (!(error instanceof WorkerFailure) || recycleWorker.has(code)) {
+        this.log(`recycle worker after ${code} job=${job.id}`);
+        await this.stop();
+      }
       throw error;
     }
     finally { clearTimeout(timer); this.pending = undefined; }

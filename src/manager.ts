@@ -24,7 +24,7 @@ export type Job = StageClock & {
   };
   expired: boolean; downloads: number; downloadedAt?: number; acknowledgedAt?: number; cancelRequested: boolean;
 };
-type Slot = { client: WorkerClient; busy: boolean; recovering: boolean; retryAt: number };
+type Slot = { client: WorkerClient; busy: boolean; recovering: boolean; retryAt: number; lastBusyEnded: number; idleNoted: boolean };
 export class Manager {
   jobs = new Map<string, Job>();
   private keys = new Map<string, { fingerprint: string; id: string }>();
@@ -45,7 +45,7 @@ export class Manager {
   private fetchAborts = new Map<string, AbortController>();
   constructor(readonly config: Config, readonly runDir: string, private log: (message: string) => void) {
     this.slots = Array.from({ length: config.concurrency }, (_, index) => ({
-      client: new WorkerClient(index, config, message => log(`[worker ${index}] ${message}`)), busy: false, recovering: false, retryAt: 0,
+      client: new WorkerClient(index, config, message => log(`[worker ${index}] ${message}`)), busy: false, recovering: false, retryAt: 0, lastBusyEnded: 0, idleNoted: false,
     }));
   }
   start() {
@@ -88,15 +88,17 @@ export class Manager {
     if (saved.reused) return saved;
     beginStage(job, 'fetching');
     this.fetching++;
+    this.log(`pipeline fetch-start job=${job.id} fetching=${this.fetching}`);
+    const started = Date.now();
     const abort = new AbortController();
     this.fetchAborts.set(job.id, abort);
-    void this.fetchThenEnqueue(job, url, abort).finally(() => {
+    void this.fetchThenEnqueue(job, url, abort, started).finally(() => {
       this.fetching = Math.max(0, this.fetching - 1);
       this.fetchAborts.delete(job.id);
     });
     return saved;
   }
-  private async fetchThenEnqueue(job: Job, url: string, abort: AbortController) {
+  private async fetchThenEnqueue(job: Job, url: string, abort: AbortController, started: number) {
     const input = job.input;
     try {
       if (job.cancelRequested || this.closed) throw new ServiceError(499, 'CANCELLED', 'Cancelled');
@@ -110,6 +112,7 @@ export class Manager {
       if (job.cancelRequested || this.closed) throw new ServiceError(499, 'CANCELLED', 'Cancelled');
       this.queue.push(job.id);
       beginStage(job, 'queued');
+      this.log(`pipeline fetch-done job=${job.id} ms=${Date.now() - started} queue=${this.queue.length}`);
       this.pump();
     } catch (error) {
       if (job.status !== 'queued') return;
@@ -122,7 +125,7 @@ export class Manager {
         const code = error instanceof ServiceError ? error.code : 'URL_FETCH_FAILED';
         const message = error instanceof Error ? error.message : String(error);
         job.error = { code, message };
-        this.log(`job ${job.id}: ${code}: ${message}`);
+        this.log(`pipeline fetch-fail job=${job.id} ms=${Date.now() - started} code=${code} message=${message}`);
       }
       job.finished = Date.now();
     }
@@ -191,7 +194,7 @@ export class Manager {
   }
   private pump() {
     if (this.closed) return;
-    for (const slot of this.slots) {
+    for (const [index, slot] of this.slots.entries()) {
       if (slot.busy || slot.recovering) continue;
       if (!slot.client.ready) {
         if (Date.now() < slot.retryAt) continue;
@@ -203,12 +206,28 @@ export class Manager {
         continue;
       }
       const id = this.queue.shift();
-      if (!id) continue;
+      if (!id) {
+        if (slot.client.ready && !slot.idleNoted) {
+          const idleMs = slot.lastBusyEnded ? Date.now() - slot.lastBusyEnded : 0;
+          this.log(`pipeline slot-idle slot=${index} idle_ms=${idleMs} queue=0 fetching=${this.fetching} uploading=${this.uploading}`);
+          slot.idleNoted = true;
+        }
+        continue;
+      }
       const job = this.jobs.get(id)!;
-      slot.busy = true; (slot as Slot & { jobId?: string }).jobId = id;
+      slot.busy = true;
+      slot.idleNoted = false;
+      (slot as Slot & { jobId?: string }).jobId = id;
+      const idleMs = slot.lastBusyEnded ? Date.now() - slot.lastBusyEnded : 0;
       job.status = 'running'; job.started = Date.now();
+      this.log(`pipeline compute-start job=${job.id} slot=${index} idle_ms=${idleMs} queue_left=${this.queue.length} fetching=${this.fetching}`);
       beginStage(job, 'preparing');
-      void this.execute(slot, job).finally(() => { slot.busy = false; (slot as Slot & { jobId?: string }).jobId = undefined; this.pump(); });
+      void this.execute(slot, job).finally(() => {
+        slot.busy = false;
+        slot.lastBusyEnded = Date.now();
+        (slot as Slot & { jobId?: string }).jobId = undefined;
+        this.pump();
+      });
     }
   }
   private applyWorkerStage(job: Job, event: WorkerEvent) {
@@ -238,6 +257,7 @@ export class Manager {
       if (job.cancelRequested) { await rm(job.output, { force: true }); throw new Error('Cancelled'); }
       job.effective = event.effective;
       job.result = { ...info, bytes: size, sha256 };
+      this.log(`pipeline compute-done job=${job.id} ms=${Date.now() - (job.started ?? Date.now())}`);
       if (storageConfigured(this.config)) {
         this.enqueueUpload(job);
         return;
@@ -293,8 +313,11 @@ export class Manager {
       this.noteFinished(job);
       return;
     }
+    const started = Date.now();
+    this.log(`pipeline upload-start job=${job.id} uploading=${this.uploading}`);
     try {
       const uploaded = await publishResult(this.config, job.output, `${job.id}.png`);
+      this.log(`pipeline upload-done job=${job.id} ms=${Date.now() - started} bytes=${job.result?.bytes ?? 0}`);
       if (job.status !== 'running') return;
       job.result = { ...job.result!, url: uploaded.url, key: uploaded.key };
       job.acknowledgedAt ??= Date.now();
