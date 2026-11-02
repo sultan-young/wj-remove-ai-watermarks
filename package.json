@@ -17,6 +17,7 @@
     "smoke": "node examples/smoke.mjs"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1136.0",
     "@fastify/multipart": "10.1.6",
     "dotenv": "16.6.1",
     "fastify": "5.12.7",

@@ -24,6 +24,8 @@ curl -X POST "$GPU_BASE_URL/v1/jobs" \
 
 URL 必须直接返回图片字节，不是分享页面。支持签名查询参数；不转发调用者 Authorization、Cookie 或自定义源站头。默认只允许 HTTP 80、HTTPS 443 端口，只允许公网地址；逐跳检查重定向、校验所有 DNS 结果，并将已检查的目标地址固定到连接，避免 DNS 重绑定。下载有总时限、跳转次数、流式字节上限；文件下载后完整解码验证。URL 不写入公开任务记录。
 
+提交 URL 时接口在收下任务后立即返回，原图在后台下载。下载或校验失败时任务变为 `failed`，并带上具体 `error.code`，不会占用 Worker。阶段 `fetching` 表示正在下载原图。
+
 可信内网存储可显式设置 `URL_ALLOW_PRIVATE=true` 和所需 `URL_ALLOWED_PORTS`；此时调用者能访问服务网络内的这些地址，仅向可信后端提供密钥。
 
 提交返回 202；幂等复用返回 200。请求返回前需完成上传/下载和输入校验，计算异步进行。网络重试必须重复使用原 Idempotency-Key、同一图片字节及参数。同一 key 配不同内容返回 409；保护仅在当前服务会话和记录存续期间有效。手动删除任务会移除对应幂等记录。
@@ -114,7 +116,11 @@ URL 必须直接返回图片字节，不是分享页面。支持签名查询参�
 - `progress`：仅当当前阶段为 `global_pass` / `face_pass` 且带有可靠的 `step/steps` 时为 `{ "step", "steps" }`，否则为 null（模型权重加载条不会当作进度）；不编造百分比。
 - `GET /v1/capabilities` 含 `timing_stages: true` 与 `known_stages` 字符串枚举（勿与 job 的 `stages` 时间线混淆）。
 
-常见阶段：`queued`、`preparing`、`loading_models`、`routing`、`visible`、`metadata`、`global_pass`、`detecting_faces`、`loading_face_models`、`face_pass`、`postprocessing`、`text_restoration`、`mock_processing`、`validating_output`、`completed` / `failed` / `cancelled`。上游只提供文案回调时，细分阶段是尽力映射。
+常见阶段：`queued`、`preparing`、`loading_models`、`routing`、`visible`、`metadata`、`global_pass`、`detecting_faces`、`loading_face_models`、`face_pass`、`postprocessing`、`text_restoration`、`mock_processing`、`validating_output`、`publishing`、`completed` / `failed` / `cancelled`。上游只提供文案回调时，细分阶段是尽力映射。
+
+配置了缤纷云密钥时，成功结果由本服务直传对象存储，`result` 额外含公网 `url` / `key`（无签名查询串），并自动视为已 ack。存储实现在 `src/storage`，业务只调用 `publishResult`。未配置时行为与原来一致，调用方自行 `GET /result`。
+
+`POST /v1/jobs/query`，body `{"ids":["uuid",...]}`（最多 200 个），一次返回这些任务的状态。会话里已没有的 id 为 `{"id","status":"missing"}`。
 
 状态：queued / running / succeeded / failed / cancelled。
 
@@ -155,7 +161,7 @@ Content-Type: application/json
 
 ## 常见错误
 
-统一结构：`{"error":{"code":"...","message":"..."}}`。任务执行失败则在任务记录的 error 中返回 code 和简要信息，细节查服务器日志。
+统一结构：`{"error":{"code":"...","message":"..."}}`。任务执行失败则在任务记录的 error 中返回 code 与具体失败原因。
 
 | HTTP / 任务错误 | 含义 |
 |---|---|

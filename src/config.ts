@@ -43,6 +43,18 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     modelOffline: flag(env.MODEL_OFFLINE, true),
     logLevel: z.enum(['silent', 'fatal', 'error', 'warn', 'info', 'debug', 'trace']).parse(env.LOG_LEVEL ?? 'info'),
     workerEnv: {} as NodeJS.ProcessEnv,
+    storage: {
+      backend: (env.STORAGE_BACKEND ?? 'bitiful').trim() || 'bitiful',
+      keyPrefix: (env.STORAGE_KEY_PREFIX ?? 'wj-ai-server/ai-gen-image').replace(/^\/+|\/+$/g, '') || 'wj-ai-server/ai-gen-image',
+      bitiful: {
+        accessKey: (env.BITIFUL_ACCESS_KEY ?? '').trim(),
+        secretKey: (env.BITIFUL_SECRET_KEY ?? '').trim(),
+        bucket: (env.BITIFUL_BUCKET ?? 'wj-ai-gen').trim() || 'wj-ai-gen',
+        endpoint: (env.BITIFUL_ENDPOINT ?? 'https://s3.bitiful.net').trim().replace(/\/+$/, ''),
+        region: (env.BITIFUL_REGION ?? 'cn-east-1').trim() || 'cn-east-1',
+        publicBaseUrl: (env.BITIFUL_PUBLIC_BASE_URL ?? `https://${(env.BITIFUL_BUCKET ?? 'wj-ai-gen').trim() || 'wj-ai-gen'}.s3.bitiful.net`).trim().replace(/\/+$/, ''),
+      },
+    },
   };
 }
 export type Config = ReturnType<typeof loadConfig>;

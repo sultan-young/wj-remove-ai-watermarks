@@ -88,8 +88,8 @@ export function progressFromStages(clock: StageClock): { step: number; steps: nu
 }
 
 export const KNOWN_STAGES = [
-  'queued', 'preparing', 'loading_models', 'routing', 'visible', 'metadata',
+  'queued', 'fetching', 'preparing', 'loading_models', 'routing', 'visible', 'metadata',
   'global_pass', 'detecting_faces', 'loading_face_models', 'face_pass',
-  'postprocessing', 'text_restoration', 'mock_processing', 'validating_output',
+  'postprocessing', 'text_restoration', 'mock_processing', 'validating_output', 'publishing',
   'completed', 'failed', 'cancelled',
 ] as const;

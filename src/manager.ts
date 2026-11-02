@@ -6,17 +6,22 @@ import { engineConfig, type Options } from './options.js';
 import { ServiceError } from './errors.js';
 import { WorkerClient, WorkerFailure, type WorkerEvent } from './worker.js';
 import { validateImage } from './images.js';
+import { downloadImage } from './download.js';
 import {
   beginStage, finishOpenStage, progressFromStages, publicStages, sealStage, type StageClock, type StageDetail,
 } from './stages.js';
+import { publishResult, storageConfigured } from './storage/index.js';
 
 type State = 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled';
 export type Job = StageClock & {
   id: string; status: State; dir: string; input: string; output: string;
   manifest?: string; options: Options; source: 'upload' | 'url';
-  created: number; started?: number; finished?: number; inputInfo: { width: number; height: number; format: string };
+  created: number; started?: number; finished?: number; inputInfo: { width: number; height: number; format: string } | null;
   error?: { code: string; message: string }; effective?: unknown;
-  result?: { width: number; height: number; format: string; bytes: number; sha256: string };
+  result?: {
+    width: number; height: number; format: string; bytes: number; sha256: string;
+    url?: string; key?: string;
+  };
   expired: boolean; downloads: number; downloadedAt?: number; acknowledgedAt?: number; cancelRequested: boolean;
 };
 type Slot = { client: WorkerClient; busy: boolean; recovering: boolean; retryAt: number };
@@ -30,6 +35,14 @@ export class Manager {
   private closed = false;
   private timer?: NodeJS.Timeout;
   private lastOrphanCleanup = 0;
+  /** 算完后的上传队列。Worker 槽位不等待这里。 */
+  private uploadQueue: Job[] = [];
+  private uploading = 0;
+  private readonly uploadConcurrency = 2;
+  private uploadAttempts = new Map<string, number>();
+  /** 已收下、还在下载原图的任务。不占 Worker。 */
+  private fetching = 0;
+  private fetchAborts = new Map<string, AbortController>();
   constructor(readonly config: Config, readonly runDir: string, private log: (message: string) => void) {
     this.slots = Array.from({ length: config.concurrency }, (_, index) => ({
       client: new WorkerClient(index, config, message => log(`[worker ${index}] ${message}`)), busy: false, recovering: false, retryAt: 0,
@@ -41,7 +54,7 @@ export class Manager {
   }
   beginIntake() {
     if (this.closed || this.draining) throw new ServiceError(503, 'DRAINING', 'Server is not accepting new tasks');
-    if (this.intakes + this.queue.length >= this.config.maxQueue) throw new ServiceError(429, 'QUEUE_FULL', 'Queue is full');
+    if (this.intakes + this.queue.length + this.fetching >= this.config.maxQueue) throw new ServiceError(429, 'QUEUE_FULL', 'Queue is full');
     if (this.jobs.size + this.intakes >= this.config.maxRecords) throw new ServiceError(429, 'TASK_RECORD_LIMIT', 'Task record limit reached; delete finished tasks');
     this.intakes++;
     let released = false;
@@ -51,22 +64,79 @@ export class Manager {
     const id = randomUUID(); const dir = path.join(this.runDir, id);
     await mkdir(dir, { mode: 0o700 }); return { id, dir };
   }
-  enqueue(job: Job, key: string | undefined, fingerprint: string) {
+  private remember(job: Job, key: string | undefined, fingerprint: string) {
     if (key) {
       const old = this.keys.get(key);
       if (old) {
         if (old.fingerprint !== fingerprint) throw new ServiceError(409, 'IDEMPOTENCY_CONFLICT', 'Key already used with different input or options');
         const existing = this.jobs.get(old.id);
-        if (existing) return { job: existing, reused: true };
+        if (existing) return { job: existing, reused: true as const };
       }
       this.keys.set(key, { fingerprint, id: job.id });
     }
-    this.jobs.set(job.id, job); this.queue.push(job.id); this.pump(); return { job, reused: false };
+    this.jobs.set(job.id, job);
+    return { job, reused: false as const };
+  }
+  enqueue(job: Job, key: string | undefined, fingerprint: string) {
+    const saved = this.remember(job, key, fingerprint);
+    if (saved.reused) return saved;
+    this.queue.push(job.id); this.pump(); return saved;
+  }
+  /** URL 任务先返回。下载和校验在后台完成，通过后才进入计算队列。 */
+  acceptFetch(job: Job, key: string | undefined, fingerprint: string, url: string) {
+    const saved = this.remember(job, key, fingerprint);
+    if (saved.reused) return saved;
+    beginStage(job, 'fetching');
+    this.fetching++;
+    const abort = new AbortController();
+    this.fetchAborts.set(job.id, abort);
+    void this.fetchThenEnqueue(job, url, abort).finally(() => {
+      this.fetching = Math.max(0, this.fetching - 1);
+      this.fetchAborts.delete(job.id);
+    });
+    return saved;
+  }
+  private async fetchThenEnqueue(job: Job, url: string, abort: AbortController) {
+    const input = job.input;
+    try {
+      if (job.cancelRequested || this.closed) throw new ServiceError(499, 'CANCELLED', 'Cancelled');
+      await downloadImage(url, input, this.config, abort.signal);
+      if (job.cancelRequested || this.closed) throw new ServiceError(499, 'CANCELLED', 'Cancelled');
+      const info = await validateImage(input, this.config.maxPixels);
+      const typedInput = path.join(job.dir, `input.${info.format === 'jpeg' ? 'jpg' : info.format}`);
+      await rename(input, typedInput);
+      job.input = typedInput;
+      job.inputInfo = info;
+      if (job.cancelRequested || this.closed) throw new ServiceError(499, 'CANCELLED', 'Cancelled');
+      this.queue.push(job.id);
+      beginStage(job, 'queued');
+      this.pump();
+    } catch (error) {
+      if (job.status !== 'queued') return;
+      const cancelled = job.cancelRequested || (error instanceof ServiceError && error.code === 'CANCELLED');
+      await rm(job.dir, { recursive: true, force: true }).catch(() => {});
+      if (job.status !== 'queued') return;
+      job.status = cancelled ? 'cancelled' : 'failed';
+      sealStage(job, job.status);
+      if (!cancelled) {
+        const code = error instanceof ServiceError ? error.code : 'URL_FETCH_FAILED';
+        const message = error instanceof Error ? error.message : String(error);
+        job.error = { code, message };
+        this.log(`job ${job.id}: ${code}: ${message}`);
+      }
+      job.finished = Date.now();
+    }
   }
   get(id: string) {
     const job = this.jobs.get(id);
     if (!job) throw new ServiceError(404, 'JOB_NOT_FOUND', 'Task not found in this service session');
     return job;
+  }
+  query(ids: string[]) {
+    return ids.map(id => {
+      const job = this.jobs.get(id);
+      return job ? this.view(job) : { id, status: 'missing' as const };
+    });
   }
   view(job: Job) {
     const { id, status, stage, options, source, error, effective, result, expired, inputInfo } = job;
@@ -85,19 +155,22 @@ export class Manager {
     };
   }
   status() {
-    const queued = this.queue.length, running = this.slots.filter(s => s.busy).length;
+    const queued = this.queue.length + this.fetching, running = this.slots.filter(s => s.busy).length;
     const uncollected = [...this.jobs.values()].filter(j => j.status === 'succeeded' && !j.expired && !j.acknowledgedAt).length;
     return { draining: this.draining, intake_count: this.intakes, queued, running,
       active_downloads: [...this.jobs.values()].reduce((n, j) => n + j.downloads, 0),
       uncollected_results: uncollected,
-      safe_to_stop: this.draining && this.intakes === 0 && queued === 0 && running === 0 && uncollected === 0 && [...this.jobs.values()].every(j => j.downloads === 0),
+      safe_to_stop: this.draining && this.intakes === 0 && queued === 0 && running === 0 && uncollected === 0 && this.fetching === 0 && this.uploading === 0 && this.uploadQueue.length === 0 && [...this.jobs.values()].every(j => j.downloads === 0),
       concurrency: this.config.concurrency, worker_mode: this.config.workerMode,
       workers: this.slots.map(s => ({ index: s.client.index, ready: s.client.ready, busy: s.busy, recovering: s.recovering, last_error: s.client.lastError, info: s.client.info })),
     };
   }
   cancel(id: string) {
     const job = this.get(id);
-    if (job.status === 'queued') {
+    if (job.status === 'queued' && this.fetchAborts.has(id)) {
+      job.cancelRequested = true;
+      this.fetchAborts.get(id)!.abort();
+    } else if (job.status === 'queued') {
       this.queue = this.queue.filter(x => x !== id);
       job.status = 'cancelled';
       sealStage(job, 'cancelled');
@@ -156,23 +229,99 @@ export class Manager {
       beginStage(job, 'validating_output');
       const tmp = path.join(job.dir, 'result.tmp.png');
       const info = await validateImage(tmp, this.config.maxPixels);
-      if (info.format !== 'png' || info.width !== job.inputInfo.width || info.height !== job.inputInfo.height) throw new Error('Unexpected output geometry or format');
+      const source = job.inputInfo;
+      if (!source || info.format !== 'png' || info.width !== source.width || info.height !== source.height) throw new Error('Unexpected output geometry or format');
       const size = (await stat(tmp)).size;
       const sha256 = createHash('sha256').update(await readFile(tmp)).digest('hex');
       if (job.cancelRequested) throw new Error('Cancelled');
       await rename(tmp, job.output);
       if (job.cancelRequested) { await rm(job.output, { force: true }); throw new Error('Cancelled'); }
-      job.effective = event.effective; job.result = { ...info, bytes: size, sha256 };
-      job.status = 'succeeded';
-      sealStage(job, 'completed');
+      job.effective = event.effective;
+      job.result = { ...info, bytes: size, sha256 };
+      if (storageConfigured(this.config)) {
+        this.enqueueUpload(job);
+        return;
+      }
+      this.complete(job);
     } catch (error) {
-      const code = error instanceof WorkerFailure ? error.code : 'PROCESSING_FAILED';
+      const code = error instanceof WorkerFailure
+        ? error.code
+        : error instanceof ServiceError
+          ? error.code
+          : 'PROCESSING_FAILED';
       this.log(`job ${job.id}: ${code}: ${error instanceof Error ? error.message : String(error)}`);
       job.status = job.cancelRequested ? 'cancelled' : 'failed';
       sealStage(job, job.status);
-      if (!job.cancelRequested) job.error = { code, message: 'Processing failed; inspect server logs with this task ID' };
+      if (!job.cancelRequested) {
+        const message = error instanceof Error ? error.message.trim() : String(error).trim();
+        job.error = { code, message: message || 'Processing failed' };
+      }
       await rm(path.join(job.dir, 'result.tmp.png'), { force: true }).catch(() => {});
-    } finally { job.finished = Date.now(); finishOpenStage(job); }
+      this.noteFinished(job);
+    }
+  }
+  private complete(job: Job) {
+    job.status = 'succeeded';
+    sealStage(job, 'completed');
+    this.noteFinished(job);
+  }
+  private noteFinished(job: Job) {
+    if (!job.finished) job.finished = Date.now();
+    finishOpenStage(job);
+  }
+  private enqueueUpload(job: Job) {
+    beginStage(job, 'publishing');
+    this.uploadQueue.push(job);
+    this.pumpUploads();
+  }
+  private pumpUploads() {
+    if (this.closed) return;
+    while (this.uploading < this.uploadConcurrency && this.uploadQueue.length) {
+      const job = this.uploadQueue.shift()!;
+      this.uploading++;
+      void this.publishJob(job).finally(() => {
+        this.uploading--;
+        this.pumpUploads();
+      });
+    }
+  }
+  private async publishJob(job: Job) {
+    if (job.status !== 'running') return;
+    if (job.cancelRequested) {
+      job.status = 'cancelled';
+      sealStage(job, 'cancelled');
+      this.noteFinished(job);
+      return;
+    }
+    try {
+      const uploaded = await publishResult(this.config, job.output, `${job.id}.png`);
+      if (job.status !== 'running') return;
+      job.result = { ...job.result!, url: uploaded.url, key: uploaded.key };
+      job.acknowledgedAt ??= Date.now();
+      this.complete(job);
+      this.uploadAttempts.delete(job.id);
+    } catch (error) {
+      const attempt = (this.uploadAttempts.get(job.id) ?? 0) + 1;
+      this.uploadAttempts.set(job.id, attempt);
+      const message = error instanceof Error ? error.message : String(error);
+      if (attempt < 5 && !this.closed && job.status === 'running') {
+        this.log(`job ${job.id}: upload retry ${attempt}: ${message}`);
+        const delay = Math.min(30_000, 1000 * 2 ** (attempt - 1));
+        const timer = setTimeout(() => {
+          if (!this.closed && job.status === 'running') {
+            this.uploadQueue.push(job);
+            this.pumpUploads();
+          }
+        }, delay);
+        timer.unref?.();
+        return;
+      }
+      this.log(`job ${job.id}: STORAGE_UPLOAD_FAILED: ${message}`);
+      job.status = 'failed';
+      job.error = { code: 'STORAGE_UPLOAD_FAILED', message: message || 'Result upload failed' };
+      sealStage(job, 'failed');
+      this.noteFinished(job);
+    }
   }
   async cleanup() {
     const now = Date.now();
@@ -199,6 +348,7 @@ export class Manager {
   }
   async close() {
     this.closed = true; clearInterval(this.timer);
+    for (const abort of this.fetchAborts.values()) abort.abort();
     await Promise.all(this.slots.map(s => s.client.stop()));
     const { writeFile } = await import('node:fs/promises');
     await writeFile(path.join(this.runDir, 'owner.json'), JSON.stringify({ pid: process.pid, created: Date.now(), stopped: true }), { mode: 0o600 });

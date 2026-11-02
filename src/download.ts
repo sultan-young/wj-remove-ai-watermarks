@@ -22,9 +22,12 @@ export async function resolveTarget(url: URL, config: Config) {
   return addresses[0]!;
 }
 
-export async function downloadImage(input: string, dest: string, config: Config) {
+export async function downloadImage(input: string, dest: string, config: Config, signal?: AbortSignal) {
   const abort = new AbortController();
   const timer = setTimeout(() => abort.abort(), config.urlTimeoutMs);
+  const onExternal = () => abort.abort();
+  signal?.addEventListener('abort', onExternal, { once: true });
+  if (signal?.aborted) abort.abort();
   try {
     let url: URL;
     try { url = new URL(input); } catch { throw new ServiceError(400, 'INVALID_URL', 'Invalid URL'); }
@@ -73,7 +76,11 @@ export async function downloadImage(input: string, dest: string, config: Config)
       return;
     }
   } catch (error) {
+    if (signal?.aborted) throw new ServiceError(499, 'CANCELLED', 'Cancelled');
     if (error instanceof ServiceError) throw error;
     throw new ServiceError(502, 'URL_FETCH_FAILED', 'Image URL could not be downloaded within the limit');
-  } finally { clearTimeout(timer); }
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener('abort', onExternal);
+  }
 }

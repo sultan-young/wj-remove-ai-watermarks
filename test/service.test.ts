@@ -124,6 +124,7 @@ test('business failure keeps the worker; timeout recycles it', async () => {
     const failure = await final(s.app, failed.id);
     assert.equal(failure.status, 'failed');
     assert.equal(failure.error.code, 'PROCESSING_FAILED');
+    assert.match(failure.error.message, /Simulated model failure/);
     assert.equal(s.manager.slots[0]!.client.ready, true);
     assert.equal(s.manager.slots[0]!.client.child!.pid, pid);
     const timedOut = (await upload(s.app, { processing: { seed: 98 } })).json();
@@ -181,7 +182,10 @@ test('URL redirects recheck destination port; multipart rejects conflicting sour
   const s = await setup({ urlAllowPrivate: true, urlPorts: [port] });
   try {
     const result = await s.app.inject({ method: 'POST', url: '/v1/jobs', headers: auth, payload: { url: `http://127.0.0.1:${port}` } });
-    assert.equal(result.statusCode, 400); assert.equal(result.json().error.code, 'URL_PORT_BLOCKED');
+    assert.equal(result.statusCode, 202, result.body);
+    const blockedJob = await final(s.app, result.json().id);
+    assert.equal(blockedJob.status, 'failed');
+    assert.equal(blockedJob.error.code, 'URL_PORT_BLOCKED');
     const form = new FormData(); form.append('file', new Blob([new Uint8Array(png)]), 'test.png');
     form.append('url', 'https://example.com/test.png');
     const request = new Request('http://localhost', { method: 'POST', body: form });
@@ -272,10 +276,17 @@ test('URL download, redirects, chunked limit, bad status, timeout and private-ad
     const submit = (route: string) => s.app.inject({ method: 'POST', url: '/v1/jobs', headers: auth, payload: { url: base + route } });
     const image = await submit('/redirect'); assert.equal(image.statusCode, 202, image.body);
     assert.equal((await final(s.app, image.json().id)).status, 'succeeded');
-    assert.equal((await submit('/loop')).statusCode, 400);
-    assert.equal((await submit('/missing')).statusCode, 502);
-    assert.equal((await submit('/large')).statusCode, 413);
-    assert.equal((await submit('/slow')).statusCode, 502);
+    const expectFetchFailure = async (route: string, code: string) => {
+      const response = await submit(route);
+      assert.equal(response.statusCode, 202, response.body);
+      const job = await final(s.app, response.json().id);
+      assert.equal(job.status, 'failed');
+      assert.equal(job.error.code, code);
+    };
+    await expectFetchFailure('/loop', 'URL_REDIRECT_LIMIT');
+    await expectFetchFailure('/missing', 'URL_HTTP_ERROR');
+    await expectFetchFailure('/large', 'IMAGE_TOO_LARGE');
+    await expectFetchFailure('/slow', 'URL_FETCH_FAILED');
     assert.equal(s.manager.intakes, 0);
     const leftovers = await readdir(s.manager.runDir); assert.equal(leftovers.length, 2); // owner + successful job only
     const blocked = { ...s.config, urlAllowPrivate: false };

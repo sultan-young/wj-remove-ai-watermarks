@@ -10,7 +10,6 @@ import { upstreamPipeline, type Config } from './config.js';
 import { requestOptionsSchema, parseOptions } from './options.js';
 import { ServiceError } from './errors.js';
 import { saveLimited, validateImage } from './images.js';
-import { downloadImage } from './download.js';
 import { beginStage, KNOWN_STAGES } from './stages.js';
 
 export async function buildApp(config: Config) {
@@ -107,20 +106,30 @@ export async function buildApp(config: Config) {
       catch (error) { throw new ServiceError(400, 'INVALID_OPTIONS', error instanceof Error ? error.message : 'Invalid options'); }
       if (manifest !== undefined && (!manifest || typeof manifest !== 'object' || Array.isArray(manifest)))
         throw new ServiceError(400, 'INVALID_MANIFEST', 'Manifest must be an object');
-      if (url !== undefined) { if (url.length > 8192) throw new ServiceError(400, 'INVALID_URL', 'URL too long'); await downloadImage(url, input, config); }
+      let manifestPath: string | undefined;
+      if (manifest !== undefined) { manifestPath = path.join(dir, 'text-manifest.json'); await writeFile(manifestPath, JSON.stringify(manifest), { mode: 0o600 }); }
+      if (url !== undefined) {
+        if (url.length > 8192) throw new ServiceError(400, 'INVALID_URL', 'URL too long');
+        try { new URL(url); } catch { throw new ServiceError(400, 'INVALID_URL', 'Invalid URL'); }
+        const fingerprint = createHash('sha256').update(url).update(JSON.stringify(options)).update(JSON.stringify(manifest ?? null)).digest('hex');
+        const job: Job = { id: created.id, dir, input, output: path.join(dir, 'result.png'), manifest: manifestPath,
+          status: 'queued', stage: 'fetching', stages: [], options, source: 'url', created: Date.now(), inputInfo: null,
+          expired: false, downloads: 0, cancelRequested: false };
+        const result = manager.acceptFetch(job, typeof key === 'string' ? key : undefined, fingerprint, url);
+        retained = !result.reused;
+        return reply.code(result.reused ? 200 : 202).send({ ...manager.view(result.job), reused: result.reused });
+      }
       const inputInfo = await validateImage(input, config.maxPixels);
       // Give the upstream file-based provenance readers a truthful extension without re-encoding.
       const typedInput = path.join(dir, `input.${inputInfo.format === 'jpeg' ? 'jpg' : inputInfo.format}`);
       const { rename } = await import('node:fs/promises');
       await rename(input, typedInput); input = typedInput;
-      let manifestPath: string | undefined;
-      if (manifest !== undefined) { manifestPath = path.join(dir, 'text-manifest.json'); await writeFile(manifestPath, JSON.stringify(manifest), { mode: 0o600 }); }
       const fingerprint = createHash('sha256').update(await readFile(input)).update(JSON.stringify(options)).update(JSON.stringify(manifest ?? null)).digest('hex');
       const job: Job = { id: created.id, dir, input, output: path.join(dir, 'result.png'), manifest: manifestPath,
-        status: 'queued', stage: 'queued', stages: [], options, source: hasFile ? 'upload' : 'url', created: Date.now(), inputInfo,
+        status: 'queued', stage: 'queued', stages: [], options, source: 'upload', created: Date.now(), inputInfo,
         expired: false, downloads: 0, cancelRequested: false };
       beginStage(job, 'queued');
-      const result = manager.enqueue(job, key, fingerprint);
+      const result = manager.enqueue(job, typeof key === 'string' ? key : undefined, fingerprint);
       retained = !result.reused;
       return reply.code(result.reused ? 200 : 202).send({ ...manager.view(result.job), reused: result.reused });
     } catch (error) {
@@ -133,6 +142,10 @@ export async function buildApp(config: Config) {
   });
   const idFrom = (params: unknown) => z.object({ id: z.string().uuid() }).parse(params).id;
   app.get('/v1/jobs', async () => ({ jobs: [...manager.jobs.values()].map(job => manager.view(job)) }));
+  app.post('/v1/jobs/query', async request => {
+    const body = z.object({ ids: z.array(z.string().uuid()).max(200) }).strict().parse(request.body ?? {});
+    return { jobs: manager.query(body.ids) };
+  });
   app.get('/v1/jobs/:id', async request => manager.view(manager.get(idFrom(request.params))));
   app.post('/v1/jobs/:id/cancel', async request => manager.cancel(idFrom(request.params)));
   app.post('/v1/jobs/:id/ack', async request => {
