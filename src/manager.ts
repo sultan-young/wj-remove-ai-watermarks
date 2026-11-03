@@ -44,7 +44,7 @@ export class Manager {
   private fetching = 0;
   private fetchAborts = new Map<string, AbortController>();
   constructor(readonly config: Config, readonly runDir: string, private log: (message: string) => void) {
-    this.slots = Array.from({ length: config.concurrency }, (_, index) => ({
+    this.slots = Array.from({ length: config.devices.length }, (_, index) => ({
       client: new WorkerClient(index, config, message => log(`[worker ${index}] ${message}`)), busy: false, recovering: false, retryAt: 0, lastBusyEnded: 0, idleNoted: false,
     }));
   }
@@ -164,7 +164,7 @@ export class Manager {
       active_downloads: [...this.jobs.values()].reduce((n, j) => n + j.downloads, 0),
       uncollected_results: uncollected,
       safe_to_stop: this.draining && this.intakes === 0 && queued === 0 && running === 0 && uncollected === 0 && this.fetching === 0 && this.uploading === 0 && this.uploadQueue.length === 0 && [...this.jobs.values()].every(j => j.downloads === 0),
-      concurrency: this.config.concurrency, worker_mode: this.config.workerMode,
+      concurrency: this.config.devices.length, worker_mode: this.config.workerMode,
       workers: this.slots.map(s => ({ index: s.client.index, ready: s.client.ready, busy: s.busy, recovering: s.recovering, last_error: s.client.lastError, info: s.client.info })),
     };
   }

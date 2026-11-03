@@ -16,12 +16,14 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
   const key = z.string().min(24).parse(env.API_KEY);
   if (key.startsWith('replace-this-')) throw new Error('Replace the example API_KEY before starting');
   const enabled = (env.ENABLED_PIPELINES ?? profiles.join(',')).split(',').map(x => z.enum(profiles).parse(x.trim()));
-  const devices = (env.GPU_DEVICES ?? '0').split(',').map(x => x.trim());
+  const devices = (env.GPU_DEVICES ?? '0').split(',').map(x => x.trim()).filter(Boolean);
+  if (devices.length === 0) throw new Error('GPU_DEVICES is empty');
   if (devices.some(x => !/^(\d+|GPU-[\w-]+|MIG-[\w/-]+)$/.test(x))) throw new Error('Invalid GPU_DEVICES');
+  if (new Set(devices).size !== devices.length) throw new Error('GPU_DEVICES lists the same GPU more than once');
   return {
     key, enabled, devices,
     host: env.HOST ?? '0.0.0.0', port: integer(env.PORT, 8000, 1, 65535),
-    concurrency: integer(env.WORKER_CONCURRENCY, 1, 1, 16),
+    concurrency: devices.length,
     maxQueue: integer(env.MAX_QUEUE_SIZE, 32, 1, 10000),
     maxRecords: integer(env.MAX_TASK_RECORDS, 2000, 1, 100000),
     maxBytes: integer(env.MAX_IMAGE_BYTES, 32 * 1024 * 1024),

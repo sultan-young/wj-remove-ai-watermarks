@@ -28,7 +28,8 @@ export class WorkerClient {
   async start(engine: EngineConfig) {
     await this.stop();
     this.key = JSON.stringify(engine);
-    const gpu = this.config.devices[this.index % this.config.devices.length]!;
+    const gpu = this.config.devices[this.index];
+    if (!gpu) throw new WorkerFailure('WORKER_START_FAILED', `Worker ${this.index} has no GPU`);
     const child = spawn(this.config.python, ['-u', this.config.workerPath], {
       stdio: ['pipe', 'pipe', 'pipe', 'pipe'],
       env: { ...process.env, ...this.config.workerEnv, CUDA_VISIBLE_DEVICES: gpu,

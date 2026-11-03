@@ -27,7 +27,6 @@ HF_HOME=/root/raiw-test/model-cache
 WORKER_MODE=real
 MODEL_OFFLINE=true
 ENABLED_PIPELINES=qwen-zimage,sdxl-zimage,chroma-zimage,auto
-WORKER_CONCURRENCY=1
 GPU_DEVICES=0
 ```
 
@@ -74,20 +73,18 @@ npm run smoke -- 'https://your-storage.example/input.png' output-service.png
 ## 并发和显存
 
 ```dotenv
-# 一张 4090 24GB，建议从这里开始
-WORKER_CONCURRENCY=1
+# 一张卡一个进程，一份模型
 GPU_DEVICES=0
 ```
 
-`WORKER_CONCURRENCY` 是**实际同时运行的图片数**。每个 Worker 是一个独立 Python 进程，各自加载模型，因此调高会增加显存、RAM 占用，不等于免费加速。
+`GPU_DEVICES` 里的每张卡启动一个 Python 进程，并只绑在这张卡上。进程数就是能同时处理的图片数。同一张卡不能写两次；每个进程都会加载一整份模型，重复绑定会把两份权重放进同一张卡并耗尽显存。
 
 ```dotenv
-# 两张兼容 GPU，每卡一个 Worker
-WORKER_CONCURRENCY=2
+# 两张卡，各一个进程
 GPU_DEVICES=0,1
 ```
 
-Worker 按 GPU_DEVICES 轮询分配；并发为 2、只写 `GPU_DEVICES=0` 就会让两个模型进程共用同一张卡。卡编号指**实例当前可见设备**，也支持 GPU UUID。改变这些环境变量需要重启服务，重启会丢失队列。
+卡编号指**实例当前可见设备**，也支持 GPU UUID。`WORKER_CONCURRENCY` 不再读取。改变 `GPU_DEVICES` 需要重启服务，重启会丢失队列。
 
 ## 参数与任务
 

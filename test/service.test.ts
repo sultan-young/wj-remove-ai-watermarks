@@ -83,8 +83,8 @@ test('upload -> persistent worker -> PNG download; auth, schema, idempotency and
   } finally { await s.close(); }
 });
 
-test('WORKER_CONCURRENCY=2 executes two tasks simultaneously; queue limit and cancel', async () => {
-  const s = await setup({ concurrency: 2, maxQueue: 1, workerEnv: { MOCK_DELAY_MS: '500' } });
+test('one process per GPU executes two tasks simultaneously; queue limit and cancel', async () => {
+  const s = await setup({ devices: ['0', '1'], maxQueue: 1, workerEnv: { MOCK_DELAY_MS: '500' } });
   try {
     await until(() => s.manager.slots.every(x => x.client.ready), Boolean);
     const a = (await upload(s.app)).json(), b = (await upload(s.app)).json();
@@ -147,7 +147,7 @@ test('worker errors, timeout and malformed output never publish a successful res
 });
 
 test('cancelling one concurrent worker does not terminate the other worker', async () => {
-  const s = await setup({ concurrency: 2, workerEnv: { MOCK_DELAY_MS: '250' } });
+  const s = await setup({ devices: ['0', '1'], workerEnv: { MOCK_DELAY_MS: '250' } });
   try {
     await until(() => s.manager.slots.every(x => x.client.ready), Boolean);
     const a = (await upload(s.app, { processing: { seed: 98 } })).json();
@@ -242,8 +242,9 @@ test('upload limits, pixel limits, manifests and invalid options reject before p
   assert.throws(() => parseOptions({ processing: { mode: 'all', mark: 'gemini' } }, config));
   const restricted = loadConfig({ API_KEY: key, ENABLED_PIPELINES: 'sdxl-zimage' });
   assert.throws(() => parseOptions({}, restricted));
-  assert.throws(() => loadConfig({ API_KEY: key, WORKER_CONCURRENCY: '0' }));
-  assert.equal(loadConfig({ API_KEY: key, WORKER_CONCURRENCY: '2' }).concurrency, 2);
+  assert.throws(() => loadConfig({ API_KEY: key, GPU_DEVICES: '0,0' }));
+  assert.equal(loadConfig({ API_KEY: key, GPU_DEVICES: '0,1', WORKER_CONCURRENCY: '4' }).concurrency, 2);
+  assert.equal(loadConfig({ API_KEY: key, GPU_DEVICES: '0' }).devices.length, 1);
 });
 
 test('failed worker initialization reports not-ready; queued tasks have a bounded wait', async () => {

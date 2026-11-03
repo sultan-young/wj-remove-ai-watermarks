@@ -23,7 +23,7 @@ for (const signal of ['SIGINT', 'SIGTERM'] as const) process.on(signal, async ()
   catch (error) { app.log.error({ err: error }, 'shutdown failed'); process.exit(1); }
 });
 await app.listen({ host: config.host, port: config.port });
-app.log.info({ concurrency: config.concurrency, devices: config.devices, mode: config.workerMode }, 'GPU image service started');
+app.log.info({ concurrency: config.devices.length, devices: config.devices, mode: config.workerMode }, 'GPU image service started');
 
 const deadline = Date.now() + config.startupTimeoutMs;
 while (Date.now() < deadline) {

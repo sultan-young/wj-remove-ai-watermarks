@@ -46,7 +46,7 @@ export async function buildApp(config: Config) {
     return {
     service_version: '1.0.0', library_version: '0.47.1', protocol_version: 1, worker_mode: config.workerMode,
     default_pipeline: upstreamPipeline, enabled_pipelines: config.enabled,
-    concurrency: config.concurrency, gpu_devices: config.devices,
+    concurrency: config.devices.length, gpu_devices: config.devices,
     input: { methods: ['multipart', 'url'], formats: ['png', 'jpeg', 'webp'], max_bytes: config.maxBytes, max_pixels: config.maxPixels,
       url_allowed_ports: config.urlPorts, url_private_addresses_allowed: config.urlAllowPrivate },
     modes: visibleAvailable ? ['all', 'visible', 'invisible', 'metadata'] : ['invisible', 'metadata'],

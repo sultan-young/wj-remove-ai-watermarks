@@ -174,9 +174,9 @@ Content-Type: application/json
 | 429 QUEUE_FULL / TASK_RECORD_LIMIT | 排队/记录已达上限 |
 | 502 URL_FETCH_FAILED / URL_HTTP_ERROR | 源站不可达、超时或非 200 |
 | 503 DRAINING | 暂停接单 |
-| 任务 CUDA_OOM | 显存不足，降低并发或图片大小，必要时启用 offload/tile 后重新验证效果 |
+| 任务 CUDA_OOM | 显存不足。确认 `GPU_DEVICES` 没有把两个进程绑到同一张卡，或减小图片 |
 | 任务 WORKER_EXITED / TASK_TIMEOUT | Worker 中断或任务超时 |
 | 任务 NO_SIGNAL | invisible 模式下 force=false、vendor=auto 且本地无目标信号；不代表无水印。all 模式成功，effective.invisible 为 no-signal |
 | 任务 NO_VISIBLE_MARK | mode=visible 没有去掉已知可见标记。不把原图当作处理结果。all 模式没有可见标记时继续后面的阶段 |
 
-多张图片每张提交一个任务。无界可以并行提交，但实际计算并发只由服务 WORKER_CONCURRENCY 控制。
+多张图片每张提交一个任务。无界可以并行提交，但同时计算的图片数等于 `GPU_DEVICES` 中的卡数，每张卡一个进程。
