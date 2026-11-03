@@ -2,7 +2,9 @@
 """安装 remove-ai-watermarks 0.47.1 的模型权重。
 
 仓库命令：npm run install:model
-前提：SDXL、SDXL-Lightning、SDXL VAE、SDXL Canny 和 YuNet 已准备好。
+下载 Qwen、Chroma、SDXL 和人脸检测实际会用到的文件。
+SDXL 只取 fp16 的 UNet 与两个文本编码器，外加 fp16 VAE、Canny ControlNet 和 4 步 Lightning LoRA。
+YuNet 写到 HF_HOME/remove-ai-watermarks，与运行时的查找路径一致。
 直接运行本文件只查询远端文件列表、统计空间；传 --download 才下载。
 npm run install:model 会带上 --download。
 不会加载 torch、占用 GPU、启动服务、清理缓存或修改服务配置。
@@ -12,12 +14,14 @@ from __future__ import annotations
 
 import argparse
 import fnmatch
+import hashlib
 import importlib.metadata
 import json
 import os
 from pathlib import Path
 import shutil
 import time
+import urllib.request
 
 GB = 1_000_000_000
 GIB = 1024 ** 3
@@ -26,6 +30,18 @@ COMPONENTS = (
     "text_encoder/*.json", "text_encoder/*.safetensors",
     "transformer/*.json", "transformer/*.safetensors",
     "vae/*.json", "vae/*.safetensors",
+)
+YUNET_URL = (
+    "https://media.githubusercontent.com/media/opencv/opencv_zoo/main/"
+    "models/face_detection_yunet/face_detection_yunet_2023mar.onnx"
+)
+YUNET_NAME = "face_detection_yunet_2023mar.onnx"
+YUNET_SHA256 = "8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4"
+SDXL_FP16 = (
+    "model_index.json", "scheduler/*", "tokenizer/*", "tokenizer_2/*",
+    "text_encoder/config.json", "text_encoder/model.fp16.safetensors",
+    "text_encoder_2/config.json", "text_encoder_2/model.fp16.safetensors",
+    "unet/config.json", "unet/diffusion_pytorch_model.fp16.safetensors",
 )
 
 
@@ -46,6 +62,14 @@ def specs(scope: str) -> list[dict]:
              "patterns": ("Qwen-Image-2512-Lightning-4steps-V1.0-bf16.safetensors",)},
             {"repo": "lodestones/Chroma1-HD", "layout": "hub",
              "patterns": COMPONENTS},
+            {"repo": "stabilityai/stable-diffusion-xl-base-1.0", "layout": "hub",
+             "patterns": SDXL_FP16},
+            {"repo": "madebyollin/sdxl-vae-fp16-fix", "layout": "hub",
+             "patterns": ("config.json", "diffusion_pytorch_model.safetensors")},
+            {"repo": "xinsir/controlnet-canny-sdxl-1.0", "layout": "hub",
+             "patterns": ("config.json", "diffusion_pytorch_model.safetensors")},
+            {"repo": "ByteDance/SDXL-Lightning", "layout": "hub",
+             "patterns": ("sdxl_lightning_4step_lora.safetensors",)},
         ])
     return result
 
@@ -57,6 +81,39 @@ def selected_files(siblings, patterns):
 
 def complete(path: Path | None, size: int) -> bool:
     return path is not None and path.is_file() and path.stat().st_size == size
+
+
+def yunet_file(hf: Path) -> Path:
+    return hf / "remove-ai-watermarks" / YUNET_NAME
+
+
+def yunet_ready(path: Path) -> bool:
+    if not path.is_file():
+        return False
+    return hashlib.sha256(path.read_bytes()).hexdigest() == YUNET_SHA256
+
+
+def yunet_remote_size() -> int:
+    request = urllib.request.Request(
+        YUNET_URL, method="HEAD", headers={"User-Agent": "remove-ai-watermarks"},
+    )
+    with urllib.request.urlopen(request, timeout=60) as response:
+        length = response.headers.get("Content-Length")
+    if length is None:
+        raise RuntimeError("无法获取 YuNet 文件大小")
+    return int(length)
+
+
+def download_yunet(destination: Path) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    request = urllib.request.Request(YUNET_URL, headers={"User-Agent": "remove-ai-watermarks"})
+    with urllib.request.urlopen(request, timeout=60) as response:
+        payload = response.read()
+    if hashlib.sha256(payload).hexdigest() != YUNET_SHA256:
+        raise RuntimeError("YuNet 校验失败")
+    temporary = destination.with_name(destination.name + ".partial")
+    temporary.write_bytes(payload)
+    temporary.replace(destination)
 
 
 def retry(label, action):
@@ -74,7 +131,7 @@ def retry(label, action):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--scope", choices=("sdxl", "all"), default="all",
-                        help="sdxl：共享人脸模型；all：再加 Qwen 和 Chroma 管线")
+                        help="sdxl：Z-Image、SAM 和 YuNet；all：再加 Qwen、Chroma 和 SDXL")
     parser.add_argument("--hf-home", default="/root/raiw-test/model-cache")
     parser.add_argument("--diffsynth-dir", default="/root/raiw-test/model-cache/diffsynth")
     parser.add_argument("--download", action="store_true")
@@ -133,6 +190,21 @@ def main():
             print(f"  所需文件 {len(files)} 个，合计 {total / GB:.2f} GB，"
                   f"尚需下载约 {needed / GB:.2f} GB", flush=True)
 
+        yunet_dest = yunet_file(hf)
+        print("查询文件列表：opencv/YuNet", flush=True)
+        if yunet_ready(yunet_dest):
+            yunet_total = yunet_dest.stat().st_size
+            yunet_needed = 0
+        else:
+            yunet_total = retry("查询 YuNet", yunet_remote_size)
+            yunet_needed = yunet_total
+        print(f"  所需文件 1 个，合计 {yunet_total / 1_000_000:.2f} MB，"
+              f"尚需下载约 {yunet_needed / 1_000_000:.2f} MB", flush=True)
+        if yunet_needed:
+            device = hf.stat().st_dev
+            disk = disks.setdefault(device, {"root": hf, "needed": 0})
+            disk["needed"] += yunet_needed
+
         enough = True
         for disk in disks.values():
             free = shutil.disk_usage(disk["root"]).free
@@ -178,8 +250,18 @@ def main():
                 temporary.write_text(spec["revision"], encoding="utf-8")
                 temporary.replace(refs / "main")
 
+        if yunet_ready(yunet_dest):
+            print(f"复用：opencv/YuNet/{YUNET_NAME}", flush=True)
+        else:
+            print(f"下载：opencv/YuNet/{YUNET_NAME}（{yunet_needed / 1_000_000:.2f} MB）", flush=True)
+            retry("下载 YuNet", lambda: download_yunet(yunet_dest))
+            if not yunet_ready(yunet_dest):
+                raise RuntimeError("YuNet 校验失败")
+
         record = {"upstream_version": version, "scope": args.scope,
                   "hf_home": str(hf), "diffsynth_dir": str(ds), "models": plan,
+                  "yunet": {"name": YUNET_NAME, "sha256": YUNET_SHA256,
+                            "path": str(yunet_dest)},
                   "validation": "file sizes checked; inference not tested"}
         destination = hf / f"prepared-missing-{args.scope}.json"
         tmp = destination.with_suffix(".tmp")
